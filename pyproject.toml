@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videotube-videogen"
+version = "0.1.0"
+description = "Local MiniMax H3 rendering service for VideoTube Studio"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2,<3",
+  "python-multipart>=0.0.9,<1",
+  "PyYAML>=6,<7",
+  "uvicorn>=0.30,<1",
+]
+
+[project.scripts]
+videogen-service = "videogen_service.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1",
+  "mypy>=1.10,<2",
+  "pytest>=8,<9",
+  "types-PyYAML>=6,<7",
+]
+
+[tool.setuptools.packages.find]
+include = ["videogen_service*"]
+
+[tool.setuptools.package-data]
+videogen_service = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["videogen_service"]

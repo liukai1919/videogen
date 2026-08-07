@@ -1,0 +1,10 @@
+.venv/
+.wsl-venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+*.py[cod]
+config.yaml
+work/
+logs/

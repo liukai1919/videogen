@@ -1,0 +1,61 @@
+host: "127.0.0.1"
+port: 8020
+work_dir: "./work"
+
+comfyui:
+  base_url: "http://127.0.0.1:8188"
+  timeout_seconds: 1800
+  poll_interval_seconds: 2.0
+
+renderer:
+  fps: 24
+  min_seconds: 5.0
+  max_seconds: 15.0
+  max_total_seconds: 120.0
+  max_shots: 12
+
+ollama:
+  # H3 and a 27B LLM do not fit on the same 32GB GPU. The service asks Ollama
+  # to unload this model immediately before it hands the card to ComfyUI.
+  unload_before_render: true
+  base_url: "http://127.0.0.1:11434"
+  model: "qwen3.6:27b"
+
+modes:
+  t2v:
+    workflow_file: "./workflows/minimax_h3_t2v.json"
+    inputs:
+      prompt: ["105:104.prompt"]
+      width: ["105:104.width"]
+      height: ["105:104.height"]
+      length: ["105:104.length"]
+      seed: ["105:15.noise_seed"]
+  i2v:
+    workflow_file: "./workflows/minimax_h3_i2v.json"
+    inputs:
+      prompt: ["105:104.prompt"]
+      width: ["105:104.width"]
+      height: ["105:104.height"]
+      length: ["105:104.length"]
+      seed: ["105:15.noise_seed"]
+      first_frame: ["114.image"]
+  flf2v:
+    workflow_file: "./workflows/minimax_h3_flf2v.json"
+    inputs:
+      prompt: ["105:104.prompt"]
+      width: ["105:104.width"]
+      height: ["105:104.height"]
+      length: ["105:104.length"]
+      seed: ["105:15.noise_seed"]
+      first_frame: ["114.image"]
+      last_frame: ["200.image"]
+  story:
+    # Requires ComfyUI_MiniMaxH3_Director in ComfyUI/custom_nodes.
+    workflow_file: "./workflows/minimax_h3_director_story.json"
+    inputs:
+      prompt: ["5.global_prompt"]
+      width: ["5.width"]
+      height: ["5.height"]
+      length: ["5.total_frames"]
+      seed: ["5.seed"]
+      timeline: ["5.timeline_data"]
