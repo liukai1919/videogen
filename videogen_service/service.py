@@ -119,8 +119,9 @@ class RenderService:
             has_first_frame=first_frame is not None,
             has_last_frame=last_frame is not None,
         )
-        # The validated duration is canonical: storyboard requests are aligned
-        # shot-by-shot and the control plane must observe that exact total.
+        # The validated duration is canonical: every request is snapped to the
+        # 17k+5 frame grid (storyboards shot by shot) and the control plane must
+        # observe the exact duration the MP4 will have, not the one it asked for.
         spec = spec.model_copy(update={"seconds": validation.seconds})
         fingerprint = _fingerprint(spec, first_frame=first_frame, last_frame=last_frame)
         with self._state_lock:

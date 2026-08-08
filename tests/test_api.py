@@ -197,6 +197,33 @@ def test_validation_returns_the_aligned_storyboard_duration(tmp_path: Path) -> N
     }
 
 
+def test_validation_reports_the_snapped_duration_not_the_requested_one(
+    tmp_path: Path,
+) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        response = client.post(
+            "/v1/validate",
+            json={
+                "mode": "t2v",
+                "prompt": "晨雾里的山谷",
+                "width": 864,
+                "height": 480,
+                "seconds": 6,
+                "has_first_frame": False,
+                "has_last_frame": False,
+            },
+        )
+
+    assert response.status_code == 200
+    # 6s asks for 144 frames, the grid delivers 158 — a 0.58s gap the control
+    # plane must see, since it is the one cutting and captioning the result.
+    assert response.json() == {
+        "mode": "t2v",
+        "timeline_mode": False,
+        "seconds": 158 / 24,
+    }
+
+
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
     with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
         response = client.post(

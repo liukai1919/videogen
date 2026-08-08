@@ -17,7 +17,7 @@ from videogen_service.comfyui import (
     load_workflow,
     patch_workflow,
 )
-from videogen_service.config import ModeConfig, ServiceConfig
+from videogen_service.config import ModeConfig, RendererConfig, ServiceConfig
 from videogen_service.models import (
     RenderProgress,
     RenderRequest,
@@ -93,6 +93,22 @@ def align_length_frames(seconds: float, *, fps: int) -> int:
     return max(0, steps) * LENGTH_STEP + LENGTH_OFFSET
 
 
+def aligned_seconds(seconds: float, *, fps: int) -> float:
+    return align_length_frames(seconds, fps=fps) / fps
+
+
+def length_in_range(seconds: float, *, settings: RendererConfig) -> bool:
+    # Compared on the aligned frame count, not the raw seconds: the aligned
+    # duration is what the service stores and re-validates, and 15s aligns up
+    # to 362 frames (15.08s), which a raw comparison against max_seconds would
+    # then reject on the second pass.
+    return (
+        align_length_frames(settings.min_seconds, fps=settings.fps)
+        <= align_length_frames(seconds, fps=settings.fps)
+        <= align_length_frames(settings.max_seconds, fps=settings.fps)
+    )
+
+
 def align_dimension(value: int) -> int:
     aligned = round(value / DIMENSION_MULTIPLE) * DIMENSION_MULTIPLE
     return max(DIMENSION_MULTIPLE, aligned)
@@ -141,7 +157,7 @@ def validate_storyboard(board: Storyboard, *, config: ServiceConfig) -> None:
     if len(board.shots) > settings.max_shots:
         raise RenderError(f"分镜最多 {settings.max_shots} 段,这份有 {len(board.shots)} 段")
     for index, shot in enumerate(board.shots, start=1):
-        if not (settings.min_seconds <= shot.seconds <= settings.max_seconds):
+        if not length_in_range(shot.seconds, settings=settings):
             raise RenderError(
                 f"第 {index} 段是 {shot.seconds:g} 秒,每段要在 "
                 f"{settings.min_seconds:g}-{settings.max_seconds:g} 秒之间"
@@ -173,7 +189,7 @@ def validate_render(
         validate_storyboard(board, config=config)
         seconds = storyboard_seconds(board, fps=config.renderer.fps)
     else:
-        if not (config.renderer.min_seconds <= request.seconds <= config.renderer.max_seconds):
+        if not length_in_range(request.seconds, settings=config.renderer):
             raise RenderError(
                 f"时长要在 {config.renderer.min_seconds:g}-{config.renderer.max_seconds:g} "
                 f"秒之间: {request.seconds:g}"
@@ -182,7 +198,7 @@ def validate_render(
             raise RenderError(f"{request.mode} 需要一张首帧图片")
         if "last_frame" in mode_settings.inputs and not has_last_frame:
             raise RenderError("首尾帧模式需要尾帧图片")
-        seconds = request.seconds
+        seconds = aligned_seconds(request.seconds, fps=config.renderer.fps)
     return RenderValidation(
         mode=request.mode, timeline_mode=timeline_mode, seconds=seconds
     )

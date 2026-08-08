@@ -89,6 +89,47 @@ def test_storyboard_duration_is_aligned_per_shot() -> None:
     assert storyboard_seconds(board, fps=24) == pytest.approx(248 / 24)
 
 
+# The storyboard case is headerless on purpose: that is the branch where the
+# shot inherits its length from the request and so round-trips the duration.
+@pytest.mark.parametrize("mode,prompt", [("t2v", "山谷"), ("story", "山谷")])
+def test_the_longest_legal_render_survives_being_validated_twice(
+    mode: str, prompt: str
+) -> None:
+    # submit() writes the validated duration back onto the spec and the worker
+    # validates that spec again, so max_seconds has to be judged on the frame
+    # grid: 15s snaps up to 362 frames, which is 15.08s.
+    config = project_config()
+    first = validate_render(
+        request(mode=mode, prompt=prompt, seconds=15.0),
+        config=config,
+        has_first_frame=False,
+        has_last_frame=False,
+    )
+
+    second = validate_render(
+        request(mode=mode, prompt=prompt, seconds=first.seconds),
+        config=config,
+        has_first_frame=False,
+        has_last_frame=False,
+    )
+
+    assert first.seconds == pytest.approx(362 / 24)
+    assert second.seconds == pytest.approx(first.seconds)
+
+
+def test_durations_outside_the_trained_range_are_still_refused() -> None:
+    config = project_config()
+
+    for seconds in (4.0, 16.0):
+        with pytest.raises(RenderError, match="时长要在"):
+            validate_render(
+                request(seconds=seconds),
+                config=config,
+                has_first_frame=False,
+                has_last_frame=False,
+            )
+
+
 def test_invalid_storyboard_is_refused_before_rendering() -> None:
     config = project_config(max_shots=1)
 
