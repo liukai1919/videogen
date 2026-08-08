@@ -22,11 +22,22 @@ cd D:\vediotube-videogen
 .\start.ps1
 ```
 
-WSL2:
+WSL2(在 PowerShell 里一条命令直接进 WSL 跑):
 
-```bash
-./start.sh
+```powershell
+wsl --cd /mnt/d/vediotube-videogen -- ./start.sh
 ```
+
+在 WSL 的终端里就是 `./start.sh`。仓库放在 `/mnt/d` 上时,脚本会自动把虚拟环境建成 `.wsl-venv`,不会跟 Windows 那份 `.venv` 打架。
+
+WSL 里还有一件事要注意:**默认的 NAT 网络下,WSL 里的 `127.0.0.1` 是 WSL 自己**,不是 Windows。ComfyUI 和 Ollama 通常跑在 Windows 上(显卡在那边),所以 `config.yaml` 里的 `comfyui.base_url`、`ollama.base_url` 要改成 Windows 主机的 IP;自检连不上时会把这个 IP 直接算给你。或者在 `%UserProfile%\.wslconfig` 里开镜像网络,`127.0.0.1` 两边就通了:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+反过来不用管:WSL 里监听 `127.0.0.1:8020` 的服务,Windows 的浏览器直接就能打开。
 
 启动前会先自检,把这台机器上真正会出问题的地方一次说清楚:
 

@@ -6,6 +6,7 @@
 
 from collections.abc import Callable
 import json
+from pathlib import Path
 from typing import Literal, NamedTuple
 import unicodedata
 from urllib.error import HTTPError, URLError
@@ -120,9 +121,56 @@ def _check_comfyui(config: ServiceConfig, probe: Callable[[str], Probe]) -> Chec
         return Check(
             "ComfyUI",
             "warn",
-            f"{base_url} 连不上({result.error})；先启动它，否则渲染会立刻失败",
+            f"{base_url} 连不上({result.error})；先启动它，否则渲染会立刻失败"
+            + _wsl_hint(base_url),
         )
     return Check("ComfyUI", "ok", base_url)
+
+
+def is_wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text(errors="replace").lower()
+    except OSError:
+        return False
+
+
+def windows_host_ip() -> str | None:
+    """The default gateway, which is how WSL2's NAT reaches the Windows host."""
+    return _route_gateway(Path("/proc/net/route"))
+
+
+def _route_gateway(path: Path) -> str | None:
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()[1:]
+    except OSError:
+        return None
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 3 or fields[1] != "00000000":
+            continue
+        try:
+            packed = int(fields[2], 16).to_bytes(4, "little")
+        except ValueError:
+            continue
+        return ".".join(str(byte) for byte in packed)
+    return None
+
+
+def _wsl_hint(base_url: str) -> str:
+    # In WSL2's default NAT mode, 127.0.0.1 is WSL itself — a ComfyUI or Ollama
+    # running on Windows is simply not there, and the operator would otherwise
+    # go looking for a crashed process that is actually running fine.
+    if not is_wsl() or not any(
+        host in base_url for host in ("127.0.0.1", "localhost", "::1")
+    ):
+        return ""
+    address = windows_host_ip()
+    target = f"http://{address}:端口" if address else "Windows 主机的 IP"
+    return (
+        f"。这是在 WSL 里:127.0.0.1 指的是 WSL 自己。若它跑在 Windows 上，"
+        f"把 config.yaml 里的地址改成 {target}，"
+        "或者给 WSL 开镜像网络(.wslconfig 里 networkingMode=mirrored)"
+    )
 
 
 def _check_ollama(config: ServiceConfig, probe: Callable[[str], Probe]) -> Check:
@@ -135,7 +183,8 @@ def _check_ollama(config: ServiceConfig, probe: Callable[[str], Probe]) -> Check
         return Check(
             "Ollama",
             "warn",
-            f"{base_url} 连不上({result.error})；渲染不受影响，字幕总结会失败",
+            f"{base_url} 连不上({result.error})；渲染不受影响，字幕总结会失败"
+            + _wsl_hint(base_url),
         )
     installed = _model_names(result.body)
     if installed and not any(

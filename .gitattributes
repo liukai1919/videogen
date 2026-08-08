@@ -1,0 +1,10 @@
+# start.sh is run by bash inside WSL from a checkout that Windows also uses.
+# A CRLF checkout makes bash fail with "$'\r': command not found", so text
+# files are stored and checked out with LF regardless of platform.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp4 binary
+*.safetensors binary

@@ -1,6 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from videogen_service import preflight
+
 from videogen_service.config import ServiceConfig
 from videogen_service.preflight import Probe, format_checks, has_failure, run_checks
 from tests.test_api import make_config
@@ -119,3 +123,42 @@ def test_a_disabled_script_feature_stops_asking_for_ollama(tmp_path: Path) -> No
 
     assert status_of(checks, "Ollama") == "ok"
     assert status_of(checks, "yt-dlp") == "ok"
+
+
+def test_wsl_gets_told_why_localhost_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # WSL2's NAT puts Windows on the default gateway, so a ComfyUI running on
+    # Windows is simply not on 127.0.0.1 — the most confusing failure there is.
+    monkeypatch.setattr(preflight, "is_wsl", lambda: True)
+    monkeypatch.setattr(preflight, "windows_host_ip", lambda: "172.28.16.1")
+    config = workflow_config(tmp_path, ALL_NODES)
+
+    checks = run_checks(config, probe=unreachable)
+
+    detail = next(check.detail for check in checks if check.name == "ComfyUI")
+    assert "172.28.16.1" in detail
+    assert "mirrored" in detail
+
+
+def test_a_plain_linux_box_gets_no_wsl_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight, "is_wsl", lambda: False)
+    config = workflow_config(tmp_path, ALL_NODES)
+
+    checks = run_checks(config, probe=unreachable)
+
+    assert "WSL" not in next(
+        check.detail for check in checks if check.name == "ComfyUI"
+    )
+
+
+def test_the_windows_host_ip_is_read_from_the_route_table(tmp_path: Path) -> None:
+    route = tmp_path / "route"
+    route.write_text(
+        "Iface\tDestination\tGateway\tFlags\n"
+        "eth0\t00000000\t01101CAC\t0003\n",
+        encoding="utf-8",
+    )
+    assert preflight._route_gateway(route) == "172.28.16.1"

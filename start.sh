@@ -11,6 +11,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 在 WSL 里默认用 .wsl-venv:仓库通常放在 /mnt/d 上，跟 Windows 那边共用同一个
+# 目录，两边都写 .venv 会互相覆盖成对方平台的解释器。
+if [[ -z "${VIDEOGEN_VENV:-}" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+    VIDEOGEN_VENV=".wsl-venv"
+fi
 VENV="${VIDEOGEN_VENV:-.venv}"
 PYTHON="$VENV/bin/python"
 STAMP="$VENV/.deps-stamp"
