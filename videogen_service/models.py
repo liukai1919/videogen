@@ -10,6 +10,51 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class H3Prompt(StrictModel):
+    """The three fields MiniMax H3 reads. Field docs double as the LLM's schema."""
+
+    integrated_multimodal_description: str = Field(
+        description=(
+            "The shot-by-shot body, opening with [Shot 1] and a style word. Later "
+            "shots start '[Shot N] At MM:SS.mmm, the camera cuts to'. Carries "
+            "action, camera moves, speaker IDs and <d> dialogue."
+        )
+    )
+    overall_soundscape: str = Field(
+        description=(
+            "1-4 sentences of ambience and action sound effects for the whole "
+            "clip. Never dialogue, singing or in-scene music. 'N/A' if silent."
+        )
+    )
+    non_diegetic_music: str = Field(
+        description=(
+            "1-3 sentences of score the characters cannot hear: instruments, "
+            "tempo, rhythm, dynamics. Never mood words. 'N/A' if there is none."
+        )
+    )
+
+    def render(self) -> str:
+        return (
+            f"integrated_multimodal_description: {self.integrated_multimodal_description}"
+            f"\n\noverall_soundscape: {self.overall_soundscape}"
+            f"\n\nnon_diegetic_music: {self.non_diegetic_music}"
+        )
+
+
+class EnhanceRequest(StrictModel):
+    mode: RenderMode
+    prompt: str = Field(min_length=1, max_length=50_000)
+    seconds: float = Field(gt=0)
+
+
+class EnhanceResponse(StrictModel):
+    prompt: str
+    enhanced: bool
+    fields: H3Prompt | None = None
+    warnings: list[str] = Field(default_factory=list)
+    seconds: float
+
+
 class RenderSpec(StrictModel):
     render_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
     mode: RenderMode

@@ -47,15 +47,33 @@ WSL2：
 
 ## 配置归属
 
-- `config.yaml` 的 `comfyui`、`renderer`、`ollama`、`modes` 只属于这个项目。
+- `config.yaml` 的 `comfyui`、`renderer`、`ollama`、`director`、`modes` 只属于这个项目。
 - 四份 H3 API workflow 位于 `workflows/`，节点指针也只在这个项目配置。
 - 原项目只配置 `videogen.service_url`、等待时间、本地预览目录和 B 站投稿声明。
 - `story` 依赖 `ComfyUI_MiniMaxH3_Director`；不使用时可从本项目配置中删掉该模式。
 
+## 提示词导演
+
+H3 的提示词是一套结构化格式（三字段、`[Shot N]` 切换时间、`<d>` 台词标签）。官方 API 用闭源的
+Context-IR 模块负责改写，本地这份工作由 `director` 承担。
+
+改写只发生在 `POST /v1/enhance`，**不在渲染路径里**。控制面拿到结果、必要时手改，再把最终提示词
+提交给 `/v1/renders`——所以一次渲染仍然只由它自己记录的 spec 决定，导演挂了也永远挡不住 GPU。
+
+- `provider: anthropic` 走 Claude，需要 `pip install -e ".[anthropic]"` 和 `ANTHROPIC_API_KEY`。
+  结构化输出保证三字段结构，官方指南作为固定前缀被缓存，重复调用的成本可以忽略。
+- `provider: ollama` 走本地模型，不需要额外依赖和密钥，可以拿来和云端 A/B 对比。
+- 提示词指南是 `prompts/h3_prompt_guide.md`，想换成官方原文直接替换这个文件。
+
+无论哪个 provider，改写结果都要过三道确定性校验：`[Shot N]` 时间戳严格递增且落在**对齐后的真实
+时长**内、`<d>` 里的台词和原文逐字一致、`non_diegetic_music` 不含情绪词。不合格就带着失败原因
+重问一次；仍不合格则连同 `warnings` 一起返回，由人决定要不要用。
+
 ## HTTP seam
 
-- `GET /health`：模式、分镜模式和限制。
+- `GET /health`：模式、分镜模式、限制，以及有没有配置导演。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
+- `POST /v1/enhance`：把大白话改写成 H3 三字段格式，返回提示词、结构化字段和校验告警；没配导演时 503。
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
 - `GET /v1/renders/{render_id}`：读取队列、进度或失败原因。
 - `GET /v1/renders/{render_id}/media`：下载完成的 MP4。

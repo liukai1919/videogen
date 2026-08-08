@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -5,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 RenderMode = Literal["t2v", "i2v", "flf2v", "story"]
+DirectorProvider = Literal["anthropic", "ollama"]
 
 
 class StrictModel(BaseModel):
@@ -39,6 +41,28 @@ class OllamaConfig(StrictModel):
     model: str
 
 
+class DirectorConfig(StrictModel):
+    """Who rewrites plain language into H3's prompt format, and how it is checked."""
+
+    enabled: bool = True
+    provider: DirectorProvider = "anthropic"
+    model: str
+    guide_file: Path
+    # Only read when provider is "anthropic"; unset is fine, the SDK also
+    # resolves an `ant auth login` profile.
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    # Only read when provider is "ollama".
+    base_url: str = "http://127.0.0.1:11434"
+    timeout_seconds: float = Field(gt=0, default=120.0)
+    # Thinking counts against this on current Claude models, so leave headroom.
+    max_tokens: int = Field(gt=0, default=16_000)
+    max_attempts: int = Field(ge=1, le=5, default=2)
+    require_verbatim_dialogue: bool = True
+
+    def api_key(self) -> str | None:
+        return os.environ.get(self.api_key_env) or None
+
+
 class ModeConfig(StrictModel):
     workflow_file: Path
     inputs: dict[str, list[str]]
@@ -64,6 +88,7 @@ class ServiceConfig(StrictModel):
     renderer: RendererConfig
     ollama: OllamaConfig
     modes: dict[RenderMode, ModeConfig]
+    director: DirectorConfig | None = None
 
     @model_validator(mode="after")
     def validate_modes(self) -> "ServiceConfig":
@@ -87,7 +112,16 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
         )
         for mode, settings in config.modes.items()
     }
-    return config.model_copy(update={"work_dir": work_dir, "modes": modes})
+    director = (
+        None
+        if config.director is None
+        else config.director.model_copy(
+            update={"guide_file": _resolve_path(base_dir, config.director.guide_file)}
+        )
+    )
+    return config.model_copy(
+        update={"work_dir": work_dir, "modes": modes, "director": director}
+    )
 
 
 def _resolve_path(base_dir: Path, path: Path) -> Path:

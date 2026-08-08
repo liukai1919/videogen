@@ -10,7 +10,10 @@ from threading import Event, Lock, Thread
 
 from videogen_service.artifacts import write_bytes_atomic, write_json_atomic
 from videogen_service.config import ServiceConfig
+from videogen_service.director import PromptDirector
 from videogen_service.models import (
+    EnhanceRequest,
+    EnhanceResponse,
     RenderProgress,
     RenderRecord,
     RenderRequest,
@@ -39,12 +42,22 @@ class RenderConflict(RuntimeError):
     pass
 
 
+class DirectorUnavailable(RuntimeError):
+    pass
+
+
 class RenderService:
     """Owns durable render execution behind the HTTP service boundary."""
 
-    def __init__(self, config: ServiceConfig, renderer: Renderer) -> None:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        renderer: Renderer,
+        director: PromptDirector | None = None,
+    ) -> None:
         self._config = config
         self._renderer = renderer
+        self._director = director
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
@@ -74,7 +87,13 @@ class RenderService:
             "length_step": LENGTH_STEP,
             "length_offset": LENGTH_OFFSET,
             "shot_header_pattern": SHOT_HEADER.pattern,
+            "director": self._director is not None,
         }
+
+    def enhance(self, request: EnhanceRequest) -> EnhanceResponse:
+        if self._director is None:
+            raise DirectorUnavailable("这个服务没有配置提示词导演")
+        return self._director.enhance(request)
 
     def close(self) -> None:
         with self._state_lock:

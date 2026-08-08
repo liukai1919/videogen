@@ -16,10 +16,33 @@ renderer:
 
 ollama:
   # H3 and a 27B LLM do not fit on the same 32GB GPU. The service asks Ollama
-  # to unload this model immediately before it hands the card to ComfyUI.
+  # to unload this model immediately before it hands the card to ComfyUI. Set
+  # this to false once nothing local competes with ComfyUI for the card.
   unload_before_render: true
   base_url: "http://127.0.0.1:11434"
   model: "qwen3.6:27b"
+
+director:
+  # Rewrites plain language into H3's three-field prompt format — the job the
+  # hosted API does with its closed-source Context-IR module. Runs only behind
+  # POST /v1/enhance, never inside a render, so a render stays reproducible from
+  # its recorded spec and an outage here can never block the GPU.
+  enabled: true
+  provider: "anthropic"        # anthropic | ollama
+  model: "claude-opus-5"
+  guide_file: "./prompts/h3_prompt_guide.md"
+  api_key_env: "ANTHROPIC_API_KEY"
+  # Reject a rewrite that changes the user's dialogue. H3 speaks whatever is
+  # inside <d> verbatim, so a paraphrase there is a wrong take.
+  require_verbatim_dialogue: true
+  # One retry, feeding the failed checks back as corrections.
+  max_attempts: 2
+  #
+  # To run the local model through the same seam instead — no API key, no extra
+  # dependency, and a useful A/B against the cloud provider:
+  # provider: "ollama"
+  # model: "qwen3.6:27b"
+  # base_url: "http://127.0.0.1:11434"
 
 modes:
   t2v:

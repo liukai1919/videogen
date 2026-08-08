@@ -9,24 +9,50 @@ from pydantic import ValidationError
 from urllib.parse import urlparse
 
 from videogen_service.config import ServiceConfig, load_config
+from videogen_service.director import PromptDirector, build_director
 from videogen_service.models import (
+    EnhanceRequest,
+    EnhanceResponse,
     RenderSpec,
     RenderValidation,
     RenderValidationRequest,
     RenderView,
 )
 from videogen_service.renderer import H3Renderer, RenderError, Renderer
-from videogen_service.service import RenderConflict, RenderNotFound, RenderService
+from videogen_service.service import (
+    DirectorUnavailable,
+    RenderConflict,
+    RenderNotFound,
+    RenderService,
+)
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
 
 
+def _build_director(settings: ServiceConfig) -> PromptDirector | None:
+    if settings.director is None or not settings.director.enabled:
+        return None
+    return PromptDirector(
+        build_director(settings.director),
+        settings=settings.director,
+        renderer=settings.renderer,
+        cache_dir=settings.work_dir / "prompts",
+    )
+
+
 def create_app(
-    config: ServiceConfig | None = None, *, renderer: Renderer | None = None
+    config: ServiceConfig | None = None,
+    *,
+    renderer: Renderer | None = None,
+    director: PromptDirector | None = None,
 ) -> FastAPI:
     settings = config or load_config()
-    service = RenderService(settings, renderer or H3Renderer(settings))
+    service = RenderService(
+        settings,
+        renderer or H3Renderer(settings),
+        director or _build_director(settings),
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -57,6 +83,16 @@ def create_app(
             return service.validate(request)
         except RenderError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/v1/enhance", response_model=EnhanceResponse)
+    def enhance(request: EnhanceRequest) -> EnhanceResponse:
+        # Always 200 with something submittable when a director is configured:
+        # a rewrite that fails verification comes back with its warnings, and a
+        # provider outage comes back as the original prompt.
+        try:
+            return service.enhance(request)
+        except DirectorUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     @app.post(
         "/v1/renders",

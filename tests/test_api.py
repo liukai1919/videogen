@@ -6,8 +6,9 @@ from typing import Callable
 from fastapi.testclient import TestClient
 
 from videogen_service.api import create_app
-from videogen_service.config import ServiceConfig
-from videogen_service.models import RenderProgress, RenderRequest
+from videogen_service.config import DirectorConfig, RendererConfig, RenderMode, ServiceConfig
+from videogen_service.director import PromptDirector
+from videogen_service.models import H3Prompt, RenderProgress, RenderRequest
 
 
 def make_config(tmp_path: Path) -> ServiceConfig:
@@ -48,6 +49,28 @@ def make_config(tmp_path: Path) -> ServiceConfig:
                 },
             },
         }
+    )
+
+
+def make_director(tmp_path: Path, written: H3Prompt) -> PromptDirector:
+    class Provider:
+        def write(
+            self,
+            *,
+            idea: str,
+            seconds: float,
+            mode: RenderMode,
+            feedback: "list[str] | tuple[str, ...]",
+        ) -> H3Prompt:
+            return written
+
+    return PromptDirector(
+        Provider(),
+        settings=DirectorConfig(model="test-model", guide_file=tmp_path / "guide.md"),
+        renderer=RendererConfig(
+            fps=24, min_seconds=5, max_seconds=15, max_total_seconds=120, max_shots=12
+        ),
+        cache_dir=tmp_path / "prompts",
     )
 
 
@@ -122,6 +145,7 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
             r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
         ),
+        "director": False,
     }
 
 
@@ -222,6 +246,42 @@ def test_validation_reports_the_snapped_duration_not_the_requested_one(
         "timeline_mode": False,
         "seconds": 158 / 24,
     }
+
+
+def test_enhance_is_unavailable_when_no_director_is_configured(tmp_path: Path) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        response = client.post(
+            "/v1/enhance", json={"mode": "t2v", "prompt": "晨雾里的山谷", "seconds": 6}
+        )
+
+    assert response.status_code == 503
+    assert "没有配置提示词导演" in response.json()["detail"]
+
+
+def test_enhance_returns_the_rewritten_prompt_and_its_warnings(tmp_path: Path) -> None:
+    written = H3Prompt(
+        integrated_multimodal_description="[Shot 1] Cinematic, fog drifts through a valley.",
+        overall_soundscape="Wind moves through wet grass.",
+        # A mood word the checker must catch and report rather than swallow.
+        non_diegetic_music="A nostalgic piano line at a slow tempo.",
+    )
+    app = create_app(
+        make_config(tmp_path),
+        renderer=FakeRenderer(),
+        director=make_director(tmp_path, written),
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").json()["director"] is True
+        response = client.post(
+            "/v1/enhance", json={"mode": "t2v", "prompt": "晨雾里的山谷", "seconds": 6}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enhanced"] is True
+    assert body["prompt"].startswith("integrated_multimodal_description: [Shot 1]")
+    assert body["seconds"] == 158 / 24
+    assert "nostalgic" in body["warnings"][0]
 
 
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
