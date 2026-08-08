@@ -22,13 +22,18 @@ cd D:\vediotube-videogen
 .\start.ps1
 ```
 
-WSL2(在 PowerShell 里一条命令直接进 WSL 跑):
+在 WSL 里跑(显卡在 Windows 上也可以,见下面的网络那段):
 
 ```powershell
-wsl --cd /mnt/d/vediotube-videogen -- ./start.sh
+cd D:\vediotube-videogen
+.\start-wsl.ps1
 ```
 
-在 WSL 的终端里就是 `./start.sh`。仓库放在 `/mnt/d` 上时,脚本会自动把虚拟环境建成 `.wsl-venv`,不会跟 Windows 那份 `.venv` 打架。
+双击 `start-wsl.cmd` 效果一样,它只是替你绕开 PowerShell 的执行策略。已经在 WSL 终端里的话就是 `./start.sh`。
+
+`start-wsl.ps1` 替你处理了两件事:把仓库的 Windows 路径翻成 WSL 路径(用 `wslpath`,不用手写 `/mnt/d/...`),以及把 `start.sh` 去掉 CR 再喂给 bash —— 这个仓库被两个平台共用,Windows 上的 checkout 很可能是 CRLF,而 CRLF 的脚本在 bash 里只会报一句看不出病因的 `$'\r': command not found`。它不改动文件,也不要求文件有可执行位。
+
+虚拟环境在 WSL 下会建成 `.wsl-venv`,和 Windows 那份 `.venv` 并存,不会互相覆盖成对方平台的解释器。
 
 WSL 里还有一件事要注意:**默认的 NAT 网络下,WSL 里的 `127.0.0.1` 是 WSL 自己**,不是 Windows。ComfyUI 和 Ollama 通常跑在 Windows 上(显卡在那边),所以 `config.yaml` 里的 `comfyui.base_url`、`ollama.base_url` 要改成 Windows 主机的 IP;自检连不上时会把这个 IP 直接算给你。或者在 `%UserProfile%\.wslconfig` 里开镜像网络,`127.0.0.1` 两边就通了:
 

@@ -3,6 +3,10 @@
 # files are stored and checked out with LF regardless of platform.
 * text=auto eol=lf
 
+# 这两个是给 Windows 跑的，CRLF 才是它们的原生形态。
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
 *.png binary
 *.jpg binary
 *.jpeg binary
