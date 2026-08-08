@@ -10,6 +10,9 @@
 # 两个平台共用:Windows 上的 checkout 很可能是 CRLF，而 CRLF 的脚本在
 # bash 里会以 $'\r': command not found 失败——那个报错完全看不出病因。
 # 管道的写法既不改动文件，也不要求文件有可执行位。
+#
+# 这个文件必须存成带 BOM 的 UTF-8:Windows PowerShell 5.1 会用 ANSI
+# (中文系统上是 GBK)读没有 BOM 的 .ps1，中文注释解错后会吞掉引号。
 
 [CmdletBinding()]
 param(
@@ -31,12 +34,44 @@ if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
 $wslArgs = @()
 if ($Distro) { $wslArgs += @("-d", $Distro) }
 
-$wslPath = (& wsl.exe @wslArgs wslpath -a "$PSScriptRoot" 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or -not $wslPath) {
-    Write-Error "WSL 起不来，或者翻译不了路径 $PSScriptRoot。先跑一次 wsl --list --verbose 看看发行版状态"
+# 用单引号包给 bash:反斜杠、空格在单引号里都是字面量。
+function Quote-ForBash([string]$Value) {
+    return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+# 原生命令往 stderr 写一行就被 $ErrorActionPreference = "Stop" 当成终止
+# 错误——wsl 的提示、uvicorn 的日志全在 stderr，所以调它们时必须让开。
+function Invoke-Wsl([string[]]$Arguments, [switch]$Capture) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($Capture) { return (& wsl.exe @Arguments 2>&1) }
+        & wsl.exe @Arguments
+        return $null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+# wslpath 必须隔着 bash 的单引号传:直接 `wsl wslpath -a D:\repo` 会把
+# 反斜杠当转义吃掉，wslpath 收到的是 "D:repo"。
+$probe = Invoke-Wsl (
+    $wslArgs + @("--", "bash", "-lc", "wslpath -a $(Quote-ForBash $PSScriptRoot)")
+) -Capture
+$wslPath = $probe |
+    Where-Object { $_ -is [string] -and $_.Trim().StartsWith("/") } |
+    Select-Object -First 1
+
+if ($wslPath) {
+    $wslPath = $wslPath.Trim()
+} elseif ($PSScriptRoot -match '^([A-Za-z]):\\(.*)$') {
+    # wslpath 不在或者报错时的兜底:盘符路径的翻译规则是固定的。
+    $wslPath = "/mnt/" + $Matches[1].ToLower() + "/" + ($Matches[2] -replace '\\', '/')
+    Write-Host "==> wslpath 没给出结果，按 /mnt 规则翻译" -ForegroundColor Yellow
+} else {
+    Write-Error "翻译不了路径 $PSScriptRoot。先跑 wsl --list --verbose 看看发行版状态,$probe"
     exit 1
 }
-$wslPath = $wslPath.Trim()
 
 # 转发给 start.sh 的参数。
 $forward = @()
@@ -45,11 +80,9 @@ if ($Config) { $forward += @("--config", $Config) }
 if ($Check) { $forward += "--check" }
 if ($Reinstall) { $forward += "--reinstall" }
 
-# 单引号包起来交给 bash，路径里有空格也不会散架。
-$quoted = ($forward | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join " "
-$repo = "'" + ($wslPath -replace "'", "'\''") + "'"
-$command = "cd $repo && tr -d '\r' < start.sh | bash -s -- $quoted"
+$quoted = ($forward | ForEach-Object { Quote-ForBash $_ }) -join " "
+$command = "cd $(Quote-ForBash $wslPath) && tr -d '\r' < start.sh | bash -s -- $quoted"
 
 Write-Host "==> WSL: $wslPath" -ForegroundColor Cyan
-& wsl.exe @wslArgs -- bash -lc $command
+Invoke-Wsl ($wslArgs + @("--", "bash", "-lc", $command))
 exit $LASTEXITCODE
