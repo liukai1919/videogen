@@ -21,6 +21,26 @@ ollama:
   base_url: "http://127.0.0.1:11434"
   model: "qwen3.6:27b"
 
+script:
+  # YouTube 网址 → yt-dlp 取字幕 → Ollama 总结 → 分镜脚本(POST /v1/scripts)。
+  enabled: true
+  # 留空则复用 ollama.model。
+  model: null
+  temperature: 0.4
+  timeout_seconds: 600
+  fetch_timeout_seconds: 60
+  # 按顺序挑字幕语言,人工字幕优先于自动字幕。
+  subtitle_languages: ["zh-Hans", "zh-Hant", "zh", "en"]
+  max_transcript_chars: 24000
+  max_source_seconds: 14400
+  target_seconds: 60
+  shot_seconds: 6
+  max_shots: 8
+  style: "写实科普纪录片质感,柔和自然光,镜头稳定,画面里不要出现文字、字幕或水印"
+  # 需要登录态或代理才能取到字幕时再填。
+  cookies_file: null
+  proxy: null
+
 modes:
   t2v:
     workflow_file: "./workflows/minimax_h3_t2v.json"

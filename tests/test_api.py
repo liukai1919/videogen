@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import threading
 import time
@@ -8,6 +9,8 @@ from fastapi.testclient import TestClient
 from videogen_service.api import create_app
 from videogen_service.config import ServiceConfig
 from videogen_service.models import RenderProgress, RenderRequest
+from videogen_service.scripting import ScriptStudio, ScriptUnavailable, Summarizer
+from videogen_service.transcript import Transcript, canonical_youtube_url
 
 
 def make_config(tmp_path: Path) -> ServiceConfig:
@@ -48,6 +51,48 @@ def make_config(tmp_path: Path) -> ServiceConfig:
                 },
             },
         }
+    )
+
+
+class FakeFetcher:
+    def fetch(self, url: str) -> Transcript:
+        video_id, watch_url = canonical_youtube_url(url)
+        return Transcript(
+            video_id=video_id,
+            title="Why the sky is blue",
+            url=watch_url,
+            language="en",
+            automatic=True,
+            duration_seconds=640.0,
+            text="Sunlight scatters off air molecules.",
+        )
+
+
+class FakeSummarizer:
+    def summarize(self, prompt: str) -> str:
+        return json.dumps(
+            {
+                "title": "蓝天为什么是蓝的",
+                "summary": "短波长的蓝光被散射得最多。",
+                "shots": [
+                    {"seconds": 6, "prompt": "航拍晴朗天空", "narration": "抬头就是蓝色"},
+                    {"seconds": 6, "prompt": "阳光散射示意", "narration": "蓝光散得最开"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+
+class FailingSummarizer:
+    def summarize(self, prompt: str) -> str:
+        raise ScriptUnavailable("连不上 Ollama(http://127.0.0.1:11434)")
+
+
+def fake_studio(tmp_path: Path, *, summarizer: Summarizer | None = None) -> ScriptStudio:
+    return ScriptStudio(
+        make_config(tmp_path),
+        fetcher=FakeFetcher(),
+        summarizer=summarizer or FakeSummarizer(),
     )
 
 
@@ -122,6 +167,14 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
             r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
         ),
+        "script": {
+            "enabled": True,
+            "model": "qwen3.6:27b",
+            "subtitle_languages": ["zh-Hans", "zh", "en"],
+            "target_seconds": 60.0,
+            "shot_seconds": 6.0,
+            "max_shots": 8,
+        },
     }
 
 
@@ -195,6 +248,66 @@ def test_validation_returns_the_aligned_storyboard_duration(tmp_path: Path) -> N
         "timeline_mode": True,
         "seconds": 248 / 24,
     }
+
+
+def test_a_youtube_url_becomes_a_storyboard_that_renders(tmp_path: Path) -> None:
+    renderer = FakeRenderer()
+    app = create_app(
+        make_config(tmp_path),
+        renderer=renderer,
+        studio=fake_studio(tmp_path),
+    )
+    with TestClient(app) as client:
+        script = client.post(
+            "/v1/scripts", json={"url": "https://youtu.be/dQw4w9WgXcQ"}
+        )
+        assert script.status_code == 200
+        result = script.json()
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_from_youtube",
+                "mode": result["mode"],
+                "prompt": result["prompt"],
+                "width": "864",
+                "height": "480",
+                "seconds": str(result["seconds"]),
+            },
+        )
+        assert submitted.status_code == 202
+        state = wait_for_done(client, "vg_from_youtube")
+
+    assert result["source"]["video_id"] == "dQw4w9WgXcQ"
+    assert [shot["prompt"] for shot in result["shots"]] == ["航拍晴朗天空", "阳光散射示意"]
+    assert state["status"] == "DONE"
+    assert renderer.requests[0].prompt == result["prompt"]
+
+
+def test_an_unreachable_ollama_is_reported_as_a_dependency_outage(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        make_config(tmp_path),
+        renderer=FakeRenderer(),
+        studio=fake_studio(tmp_path, summarizer=FailingSummarizer()),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/scripts", json={"url": "https://youtu.be/dQw4w9WgXcQ"}
+        )
+
+    assert response.status_code == 503
+    assert "Ollama" in response.json()["detail"]
+
+
+def test_a_link_that_is_not_youtube_is_rejected(tmp_path: Path) -> None:
+    app = create_app(
+        make_config(tmp_path), renderer=FakeRenderer(), studio=fake_studio(tmp_path)
+    )
+    with TestClient(app) as client:
+        response = client.post("/v1/scripts", json={"url": "https://vimeo.com/12345"})
+
+    assert response.status_code == 400
 
 
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:

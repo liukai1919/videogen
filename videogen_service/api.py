@@ -14,8 +14,11 @@ from videogen_service.models import (
     RenderValidation,
     RenderValidationRequest,
     RenderView,
+    ScriptRequest,
+    ScriptResult,
 )
 from videogen_service.renderer import H3Renderer, RenderError, Renderer
+from videogen_service.scripting import ScriptError, ScriptStudio, ScriptUnavailable
 from videogen_service.service import RenderConflict, RenderNotFound, RenderService
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -23,10 +26,15 @@ _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
 
 
 def create_app(
-    config: ServiceConfig | None = None, *, renderer: Renderer | None = None
+    config: ServiceConfig | None = None,
+    *,
+    renderer: Renderer | None = None,
+    studio: ScriptStudio | None = None,
 ) -> FastAPI:
     settings = config or load_config()
-    service = RenderService(settings, renderer or H3Renderer(settings))
+    service = RenderService(
+        settings, renderer or H3Renderer(settings), studio=studio
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -56,6 +64,17 @@ def create_app(
         try:
             return service.validate(request)
         except RenderError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/v1/scripts", response_model=ScriptResult)
+    def script(request: ScriptRequest) -> ScriptResult:
+        # Captions and the local LLM both take minutes; FastAPI runs this sync
+        # handler on its worker threads, so the render queue keeps draining.
+        try:
+            return service.script(request)
+        except ScriptUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except (ScriptError, RenderError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post(

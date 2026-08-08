@@ -39,6 +39,30 @@ class OllamaConfig(StrictModel):
     model: str
 
 
+class ScriptConfig(StrictModel):
+    """Turning a YouTube URL into a storyboard: captions in, shot list out."""
+
+    enabled: bool = True
+    # Falls back to ollama.model so a single-model install configures nothing.
+    model: str | None = None
+    temperature: float = Field(default=0.4, ge=0, le=2)
+    timeout_seconds: float = Field(default=600, gt=0)
+    fetch_timeout_seconds: float = Field(default=60, gt=0)
+    subtitle_languages: list[str] = Field(
+        default_factory=lambda: ["zh-Hans", "zh", "en"], min_length=1
+    )
+    max_transcript_chars: int = Field(default=24_000, gt=0)
+    max_source_seconds: float = Field(default=14_400, gt=0)
+    target_seconds: float = Field(default=60, gt=0)
+    shot_seconds: float = Field(default=6, gt=0)
+    max_shots: int = Field(default=8, gt=0)
+    style: str = (
+        "写实科普纪录片质感,柔和自然光,镜头稳定,画面里不要出现文字、字幕或水印"
+    )
+    cookies_file: Path | None = None
+    proxy: str | None = None
+
+
 class ModeConfig(StrictModel):
     workflow_file: Path
     inputs: dict[str, list[str]]
@@ -63,6 +87,7 @@ class ServiceConfig(StrictModel):
     comfyui: ComfyUiConfig
     renderer: RendererConfig
     ollama: OllamaConfig
+    script: ScriptConfig = Field(default_factory=ScriptConfig)
     modes: dict[RenderMode, ModeConfig]
 
     @model_validator(mode="after")
@@ -71,6 +96,18 @@ class ServiceConfig(StrictModel):
             raise ValueError("unauthenticated videogen service must listen on loopback")
         if not self.modes:
             raise ValueError("at least one render mode is required")
+        # A generated storyboard is submitted through the same /v1/renders seam
+        # as a hand-written one, so it has to fit the renderer's own limits.
+        if self.script.max_shots > self.renderer.max_shots:
+            raise ValueError("script max_shots must not exceed renderer max_shots")
+        if not (
+            self.renderer.min_seconds
+            <= self.script.shot_seconds
+            <= self.renderer.max_seconds
+        ):
+            raise ValueError(
+                "script shot_seconds must sit inside the renderer's shot range"
+            )
         return self
 
 
@@ -87,7 +124,14 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
         )
         for mode, settings in config.modes.items()
     }
-    return config.model_copy(update={"work_dir": work_dir, "modes": modes})
+    script = config.script
+    if script.cookies_file is not None:
+        script = script.model_copy(
+            update={"cookies_file": _resolve_path(base_dir, script.cookies_file)}
+        )
+    return config.model_copy(
+        update={"work_dir": work_dir, "modes": modes, "script": script}
+    )
 
 
 def _resolve_path(base_dir: Path, path: Path) -> Path:

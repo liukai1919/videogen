@@ -18,6 +18,8 @@ from videogen_service.models import (
     RenderValidation,
     RenderValidationRequest,
     RenderView,
+    ScriptRequest,
+    ScriptResult,
 )
 from videogen_service.renderer import (
     LENGTH_OFFSET,
@@ -26,6 +28,7 @@ from videogen_service.renderer import (
     Renderer,
     validate_render,
 )
+from videogen_service.scripting import ScriptStudio
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _RENDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -42,9 +45,16 @@ class RenderConflict(RuntimeError):
 class RenderService:
     """Owns durable render execution behind the HTTP service boundary."""
 
-    def __init__(self, config: ServiceConfig, renderer: Renderer) -> None:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        renderer: Renderer,
+        *,
+        studio: ScriptStudio | None = None,
+    ) -> None:
         self._config = config
         self._renderer = renderer
+        self._studio = studio or ScriptStudio(config)
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
@@ -74,6 +84,14 @@ class RenderService:
             "length_step": LENGTH_STEP,
             "length_offset": LENGTH_OFFSET,
             "shot_header_pattern": SHOT_HEADER.pattern,
+            "script": {
+                "enabled": self._config.script.enabled,
+                "model": self._config.script.model or self._config.ollama.model,
+                "subtitle_languages": list(self._config.script.subtitle_languages),
+                "target_seconds": self._config.script.target_seconds,
+                "shot_seconds": self._config.script.shot_seconds,
+                "max_shots": self._config.script.max_shots,
+            },
         }
 
     def close(self) -> None:
@@ -103,6 +121,9 @@ class RenderService:
             has_first_frame=request.has_first_frame,
             has_last_frame=request.has_last_frame,
         )
+
+    def script(self, request: ScriptRequest) -> ScriptResult:
+        return self._studio.create(request)
 
     def submit(
         self,
