@@ -11,41 +11,57 @@ VideoTube Studio 的独立本地渲染服务。它拥有 MiniMax H3、ComfyUI wo
 
 浏览器现在直接对着本服务：手工生成的那条路不再经过 `videotube`。`videotube` 的自动化流水线还是老样子——提交一个远端 render，轮询状态，完成后把 MP4 下载回自己的 `work/videogen/`，所以它的任务记录和发布流程都不用改。`/health`、`/v1/validate`、`/v1/renders` 这几个它在用的字段因此是冻结的契约。
 
-## 安装
+## 启动
 
-Windows PowerShell：
+一条命令就够,虚拟环境、依赖和 `config.yaml` 都是缺什么补什么,已经就位就直接启动:
+
+Windows PowerShell:
 
 ```powershell
 cd D:\vediotube-videogen
+.\start.ps1
+```
+
+WSL2:
+
+```bash
+./start.sh
+```
+
+启动前会先自检,把这台机器上真正会出问题的地方一次说清楚:
+
+```text
+✓ 服务地址        http://127.0.0.1:8020/  ← 生成台就在这个地址
+✓ 工作目录        D:\vediotube-videogen\work
+✓ t2v workflow    minimax_h3_t2v.json
+! ComfyUI         http://127.0.0.1:8188 连不上；先启动它，否则渲染会立刻失败
+✓ Ollama          http://127.0.0.1:11434 · qwen3.6:27b
+✓ yt-dlp          2026.07.04
+```
+
+`✗` 是启动不了的问题(workflow 存成了界面格式、节点指针对不上、工作目录不可写),服务会停下并退出码 1。`!` 只是提醒:ComfyUI 和 Ollama 通常是后启动的,不挡着服务先跑起来。
+
+常用参数:
+
+| | PowerShell | bash |
+| --- | --- | --- |
+| 只自检不启动 | `.\start.ps1 -Check` | `./start.sh --check` |
+| 换端口 | `.\start.ps1 -Port 8030` | `./start.sh --port 8030` |
+| 换配置 | `.\start.ps1 -Config other.yaml` | `./start.sh --config other.yaml` |
+| 强制重装依赖 | `.\start.ps1 -Reinstall` | `./start.sh --reinstall` |
+
+改过 `pyproject.toml` 后脚本会自己重装依赖,平时启动不会为此变慢。
+
+想手工来也可以,脚本做的就是这几步:
+
+```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 Copy-Item config.example.yaml config.yaml
-```
-
-WSL2：
-
-```bash
-cd /mnt/d/vediotube-videogen
-python3 -m venv .wsl-venv
-.wsl-venv/bin/python -m pip install -e '.[dev]'
-cp config.example.yaml config.yaml
-```
-
-先启动 ComfyUI，再用刚创建的虚拟环境启动本服务。
-
-Windows PowerShell：
-
-```powershell
 .\.venv\Scripts\videogen-service.exe --config config.yaml
 ```
 
-WSL2：
-
-```bash
-.wsl-venv/bin/videogen-service --config config.yaml
-```
-
-默认只监听 `127.0.0.1:8020`。启动后直接打开 `http://127.0.0.1:8020/` 就是视频生成台——页面由本服务自己提供，不再需要先起 `videotube` 的 Web 控制台。
+先启动 ComfyUI,再启动本服务。服务起来后直接打开 `http://127.0.0.1:8020/` 就是视频生成台。
 
 ## 配置归属
 
