@@ -8,12 +8,20 @@ from typing import Any
 
 import pytest
 
-from videogen_service.config import DirectorConfig, RendererConfig, RenderMode
+from videogen_service.config import (
+    DirectorConfig,
+    DirectorProviderConfig,
+    RendererConfig,
+    RenderMode,
+)
 from videogen_service.director import (
     AnthropicDirector,
     DirectorError,
     OllamaDirector,
+    OpenAIDirector,
     PromptDirector,
+    UnknownDirector,
+    build_directors,
     check_prompt,
 )
 from videogen_service.models import EnhanceRequest, H3Prompt
@@ -66,15 +74,23 @@ class FakeProvider:
         return result
 
 
-def director(provider: FakeProvider, tmp_path: Path, **overrides: object) -> PromptDirector:
-    values: dict[str, object] = {
-        "model": "test-model",
-        "guide_file": tmp_path / "guide.md",
-    }
-    values.update(overrides)
+def entry(model: str = "test-model") -> dict[str, str]:
+    return {"provider": "ollama", "model": model}
+
+
+def director(
+    tmp_path: Path, default: str = "one", **providers: FakeProvider
+) -> PromptDirector:
+    named = providers or {"one": FakeProvider(prompt())}
     return PromptDirector(
-        provider,
-        settings=DirectorConfig.model_validate(values),
+        dict(named),
+        settings=DirectorConfig.model_validate(
+            {
+                "guide_file": tmp_path / "guide.md",
+                "default": default,
+                "providers": {name: entry(name) for name in named},
+            }
+        ),
         renderer=RendererConfig(
             fps=24, min_seconds=5, max_seconds=15, max_total_seconds=120, max_shots=12
         ),
@@ -174,7 +190,7 @@ def test_a_failed_check_is_fed_back_and_the_retry_is_kept(tmp_path: Path) -> Non
     broken = prompt(non_diegetic_music="An epic swell of strings.")
     provider = FakeProvider(broken, prompt())
 
-    response = director(provider, tmp_path).enhance(
+    response = director(tmp_path, one=provider).enhance(
         EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
     )
 
@@ -192,7 +208,7 @@ def test_the_least_broken_attempt_survives_when_neither_is_clean(tmp_path: Path)
     better = prompt(non_diegetic_music="An epic swell of strings.")
     provider = FakeProvider(worse, better)
 
-    response = director(provider, tmp_path).enhance(
+    response = director(tmp_path, one=provider).enhance(
         EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
     )
 
@@ -203,7 +219,7 @@ def test_the_least_broken_attempt_survives_when_neither_is_clean(tmp_path: Path)
 def test_a_provider_outage_returns_the_original_prompt(tmp_path: Path) -> None:
     provider = FakeProvider(DirectorError("连接失败"))
 
-    response = director(provider, tmp_path).enhance(
+    response = director(tmp_path, one=provider).enhance(
         EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
     )
 
@@ -216,7 +232,7 @@ def test_a_provider_outage_returns_the_original_prompt(tmp_path: Path) -> None:
 def test_the_reported_duration_is_the_aligned_one(tmp_path: Path) -> None:
     provider = FakeProvider(prompt())
 
-    response = director(provider, tmp_path).enhance(
+    response = director(tmp_path, one=provider).enhance(
         EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
     )
 
@@ -229,7 +245,7 @@ def test_the_reported_duration_is_the_aligned_one(tmp_path: Path) -> None:
 
 def test_an_identical_request_is_served_from_cache(tmp_path: Path) -> None:
     provider = FakeProvider(prompt())
-    writer = director(provider, tmp_path)
+    writer = director(tmp_path, one=provider)
     request = EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
 
     first = writer.enhance(request)
@@ -241,15 +257,130 @@ def test_an_identical_request_is_served_from_cache(tmp_path: Path) -> None:
 
 def test_a_degraded_response_is_not_cached(tmp_path: Path) -> None:
     provider = FakeProvider(DirectorError("连接失败"), prompt())
-    writer = director(provider, tmp_path)
+    writer = director(tmp_path, one=provider)
     request = EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
 
     assert writer.enhance(request).enhanced is False
     assert writer.enhance(request).enhanced is True
 
 
-# The two providers below are the only code here that touches a socket, so they
-# are exercised against a real one rather than a stub.
+def test_the_catalogue_is_what_the_picker_renders(tmp_path: Path) -> None:
+    writer = director(
+        tmp_path, "two", one=FakeProvider(prompt()), two=FakeProvider(prompt())
+    )
+
+    assert writer.catalogue == {
+        "default": "two",
+        "providers": [
+            {"id": "one", "provider": "ollama", "model": "one"},
+            {"id": "two", "provider": "ollama", "model": "two"},
+        ],
+    }
+
+
+def test_the_request_picks_the_writer_and_the_answer_says_which(tmp_path: Path) -> None:
+    claude, chatgpt = FakeProvider(prompt()), FakeProvider(prompt())
+    writer = director(tmp_path, "claude", claude=claude, chatgpt=chatgpt)
+
+    response = writer.enhance(
+        EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0, provider="chatgpt")
+    )
+
+    assert response.provider == "chatgpt"
+    assert len(chatgpt.calls) == 1
+    assert claude.calls == []
+
+
+def test_omitting_the_provider_falls_back_to_the_default(tmp_path: Path) -> None:
+    claude, chatgpt = FakeProvider(prompt()), FakeProvider(prompt())
+    writer = director(tmp_path, "claude", claude=claude, chatgpt=chatgpt)
+
+    response = writer.enhance(EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0))
+
+    assert response.provider == "claude"
+    assert chatgpt.calls == []
+
+
+def test_a_writer_that_cannot_start_is_dropped_instead_of_killing_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The OpenAI client refuses to be constructed without a key, and this runs
+    # at boot — one unconfigured writer must not take the render service down.
+    for name in ("OPENAI_API_KEY", "OPENAI_ADMIN_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    guide = tmp_path / "guide.md"
+    guide.write_text("GUIDE", encoding="utf-8")
+    settings = DirectorConfig.model_validate(
+        {
+            "guide_file": guide,
+            "default": "chatgpt",
+            "providers": {
+                "chatgpt": {"provider": "openai", "model": "gpt-test"},
+                "local": {"provider": "ollama", "model": "qwen3.6:27b"},
+            },
+        }
+    )
+
+    built = build_directors(settings)
+
+    assert sorted(built) == ["local"]
+
+
+def test_an_unavailable_default_falls_back_to_one_that_works(tmp_path: Path) -> None:
+    writer = PromptDirector(
+        {"local": FakeProvider(prompt())},
+        settings=DirectorConfig.model_validate(
+            {
+                "guide_file": tmp_path / "guide.md",
+                "default": "chatgpt",
+                "providers": {
+                    "chatgpt": {"provider": "openai", "model": "gpt-test"},
+                    "local": {"provider": "ollama", "model": "qwen3.6:27b"},
+                },
+            }
+        ),
+        renderer=RendererConfig(
+            fps=24, min_seconds=5, max_seconds=15, max_total_seconds=120, max_shots=12
+        ),
+        cache_dir=tmp_path / "prompts",
+    )
+
+    # The picker must not offer a writer that could not start.
+    assert writer.catalogue == {
+        "default": "local",
+        "providers": [{"id": "local", "provider": "ollama", "model": "qwen3.6:27b"}],
+    }
+    assert writer.enhance(
+        EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0)
+    ).provider == "local"
+
+
+def test_an_unknown_writer_is_a_client_error_not_a_degrade(tmp_path: Path) -> None:
+    writer = director(tmp_path, "claude", claude=FakeProvider(prompt()))
+
+    with pytest.raises(UnknownDirector, match="gemini"):
+        writer.enhance(
+            EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0, provider="gemini")
+        )
+
+
+def test_each_writer_gets_its_own_cache_entry(tmp_path: Path) -> None:
+    # Switching writers to compare them must actually re-ask, not replay the
+    # other one's answer.
+    claude, chatgpt = FakeProvider(prompt()), FakeProvider(prompt())
+    writer = director(tmp_path, "claude", claude=claude, chatgpt=chatgpt)
+
+    for provider in ("claude", "chatgpt", "claude"):
+        writer.enhance(
+            EnhanceRequest(mode="t2v", prompt=IDEA, seconds=10.0, provider=provider)
+        )
+
+    assert len(claude.calls) == 1
+    assert len(chatgpt.calls) == 1
+
+
+# The three providers below are the only code here that touches a socket, so
+# they are exercised against a real one rather than a stub.
 
 FIELDS = {
     "integrated_multimodal_description": "[Shot 1] Cinematic, a valley in fog.",
@@ -286,16 +417,11 @@ def serving(reply: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
         server.server_close()
 
 
-def test_the_ollama_provider_asks_for_the_schema_and_parses_the_reply(
-    tmp_path: Path,
-) -> None:
+def test_the_ollama_provider_asks_for_the_schema_and_parses_the_reply() -> None:
     reply = {"message": {"content": json.dumps(FIELDS)}}
     with serving(reply) as (base_url, seen):
-        settings = DirectorConfig(
-            provider="ollama",
-            model="qwen3.6:27b",
-            guide_file=tmp_path / "guide.md",
-            base_url=base_url,
+        settings = DirectorProviderConfig(
+            provider="ollama", model="qwen3.6:27b", base_url=base_url
         )
         written = OllamaDirector(settings, guide="GUIDE").write(
             idea=IDEA, seconds=10.125, mode="t2v", feedback=["修掉情绪词"]
@@ -309,15 +435,10 @@ def test_the_ollama_provider_asks_for_the_schema_and_parses_the_reply(
     assert written.non_diegetic_music == "N/A"
 
 
-def test_the_ollama_provider_rejects_a_reply_that_is_not_the_three_fields(
-    tmp_path: Path,
-) -> None:
+def test_the_ollama_provider_rejects_a_reply_that_is_not_the_three_fields() -> None:
     with serving({"message": {"content": '{"vibes": "good"}'}}) as (base_url, _):
-        settings = DirectorConfig(
-            provider="ollama",
-            model="qwen3.6:27b",
-            guide_file=tmp_path / "guide.md",
-            base_url=base_url,
+        settings = DirectorProviderConfig(
+            provider="ollama", model="qwen3.6:27b", base_url=base_url
         )
         with pytest.raises(DirectorError, match="没有按三字段结构返回"):
             OllamaDirector(settings, guide="GUIDE").write(
@@ -326,7 +447,7 @@ def test_the_ollama_provider_rejects_a_reply_that_is_not_the_three_fields(
 
 
 def test_the_claude_provider_caches_the_guide_and_pins_the_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pytest.importorskip("anthropic")
     reply = {
@@ -340,12 +461,12 @@ def test_the_claude_provider_caches_the_guide_and_pins_the_schema(
         "usage": {"input_tokens": 10, "output_tokens": 20},
     }
     with serving(reply) as (base_url, seen):
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
         monkeypatch.setenv("VIDEOGEN_TEST_KEY", "sk-ant-test")
-        settings = DirectorConfig(
+        settings = DirectorProviderConfig(
+            provider="anthropic",
             model="claude-opus-5",
-            guide_file=tmp_path / "guide.md",
             api_key_env="VIDEOGEN_TEST_KEY",
+            base_url=base_url,
         )
         written = AnthropicDirector(settings, guide="GUIDE").write(
             idea=IDEA, seconds=10.125, mode="t2v", feedback=[]
@@ -359,3 +480,79 @@ def test_the_claude_provider_caches_the_guide_and_pins_the_schema(
     assert schema["type"] == "json_schema"
     assert schema["schema"]["additionalProperties"] is False
     assert written.overall_soundscape == "Wind through wet grass."
+
+
+def test_the_chatgpt_provider_pins_a_strict_schema_and_parses_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("openai")
+    monkeypatch.setenv("VIDEOGEN_TEST_KEY", "sk-test")
+    reply = {
+        "id": "chatcmpl-01",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gpt-test",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(FIELDS),
+                    "refusal": None,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+    }
+    with serving(reply) as (base_url, seen):
+        settings = DirectorProviderConfig(
+            provider="openai",
+            model="gpt-test",
+            api_key_env="VIDEOGEN_TEST_KEY",
+            base_url=base_url,
+        )
+        written = OpenAIDirector(settings, guide="GUIDE").write(
+            idea=IDEA, seconds=10.125, mode="t2v", feedback=[]
+        )
+
+    assert seen["path"].endswith("/chat/completions")
+    schema = seen["body"]["response_format"]["json_schema"]
+    # strict mode is the whole point: without it the three fields are a
+    # suggestion, and a missing one only shows up as a parse error later.
+    assert schema["strict"] is True
+    assert schema["schema"]["additionalProperties"] is False
+    assert sorted(schema["schema"]["required"]) == sorted(FIELDS)
+    assert seen["body"]["messages"][0] == {"role": "system", "content": "GUIDE"}
+    assert written.non_diegetic_music == "N/A"
+
+
+def test_a_truncated_chatgpt_reply_says_so_instead_of_failing_to_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("openai")
+    monkeypatch.setenv("VIDEOGEN_TEST_KEY", "sk-test")
+    reply = {
+        "id": "chatcmpl-02",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gpt-test",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": '{"integrated_mul'},
+                "finish_reason": "length",
+            }
+        ],
+    }
+    with serving(reply) as (base_url, _):
+        settings = DirectorProviderConfig(
+            provider="openai",
+            model="gpt-test",
+            api_key_env="VIDEOGEN_TEST_KEY",
+            base_url=base_url,
+        )
+        with pytest.raises(DirectorError, match="max_tokens 截断"):
+            OpenAIDirector(settings, guide="GUIDE").write(
+                idea=IDEA, seconds=10.125, mode="t2v", feedback=[]
+            )

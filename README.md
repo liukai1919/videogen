@@ -60,10 +60,29 @@ Context-IR 模块负责改写，本地这份工作由 `director` 承担。
 改写只发生在 `POST /v1/enhance`，**不在渲染路径里**。控制面拿到结果、必要时手改，再把最终提示词
 提交给 `/v1/renders`——所以一次渲染仍然只由它自己记录的 spec 决定，导演挂了也永远挡不住 GPU。
 
-- `provider: anthropic` 走 Claude，需要 `pip install -e ".[anthropic]"` 和 `ANTHROPIC_API_KEY`。
-  结构化输出保证三字段结构，官方指南作为固定前缀被缓存，重复调用的成本可以忽略。
-- `provider: ollama` 走本地模型，不需要额外依赖和密钥，可以拿来和云端 A/B 对比。
-- 提示词指南是 `prompts/h3_prompt_guide.md`，想换成官方原文直接替换这个文件。
+`director.providers` 下的每个键都是控制面选择器里的一项，同一个 provider 可以配两次用不同
+模型做 A/B。三种 provider：
+
+| provider | 依赖 | 密钥 | 说明 |
+| --- | --- | --- | --- |
+| `anthropic` | `pip install -e ".[anthropic]"` | `ANTHROPIC_API_KEY` | 结构化输出保证三字段结构；指南作为固定前缀被缓存，重复调用成本可忽略 |
+| `openai` | `pip install -e ".[openai]"` | `OPENAI_API_KEY` | 走 chat completions + `strict` JSON schema，因此兼容各类 OpenAI 协议网关（配 `base_url`） |
+| `ollama` | 无 | 无 | 本地模型，用来跑通链路和跟云端对比 |
+
+`api_key_env` 只在需要覆盖 SDK 默认环境变量名时才配；`base_url` 只在要走网关时才配。
+
+**起不来的 provider 会被摘掉，而不是让服务启动失败。** 缺 SDK、缺密钥、`base_url` 写错都只会
+在日志里留一条警告，然后从选择器里消失——渲染服务照常启动。全部都起不来时 `/v1/enhance` 返回
+503，渲染完全不受影响。
+
+前端需要的两个契约：
+
+- `GET /health` 的 `director` 字段：`null`（没有可用的）或者
+  `{"default": "claude", "providers": [{"id", "provider", "model"}, ...]}`，直接拿来渲染选择器。
+- `POST /v1/enhance` 的可选 `provider` 字段：填 `id`，不填走 `default`；填了不存在的 id 返回 400
+  （而不是悄悄用默认的那个）。响应里的 `provider` 会回报实际用的是哪一个。
+
+提示词指南是 `prompts/h3_prompt_guide.md`，想换成官方原文直接替换这个文件。
 
 无论哪个 provider，改写结果都要过三道确定性校验：`[Shot N]` 时间戳严格递增且落在**对齐后的真实
 时长**内、`<d>` 里的台词和原文逐字一致、`non_diegetic_music` 不含情绪词。不合格就带着失败原因

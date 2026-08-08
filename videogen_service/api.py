@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from urllib.parse import urlparse
 
 from videogen_service.config import ServiceConfig, load_config
-from videogen_service.director import PromptDirector, build_director
+from videogen_service.director import PromptDirector, UnknownDirector, build_directors
 from videogen_service.models import (
     EnhanceRequest,
     EnhanceResponse,
@@ -33,8 +33,13 @@ _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
 def _build_director(settings: ServiceConfig) -> PromptDirector | None:
     if settings.director is None or not settings.director.enabled:
         return None
+    providers = build_directors(settings.director)
+    if not providers:
+        # Every configured writer failed to start. /v1/enhance answers 503 and
+        # rendering carries on untouched.
+        return None
     return PromptDirector(
-        build_director(settings.director),
+        providers,
         settings=settings.director,
         renderer=settings.renderer,
         cache_dir=settings.work_dir / "prompts",
@@ -91,6 +96,8 @@ def create_app(
         # provider outage comes back as the original prompt.
         try:
             return service.enhance(request)
+        except UnknownDirector as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         except DirectorUnavailable as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 

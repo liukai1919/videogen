@@ -19,9 +19,10 @@ dependencies = [
 videogen-service = "videogen_service.cli:main"
 
 [project.optional-dependencies]
-# Only needed when director.provider is "anthropic"; the ollama provider runs on
+# Needed only for the matching director provider; the ollama provider runs on
 # the standard library.
 anthropic = ["anthropic>=0.116,<1"]
+openai = ["openai>=1.60,<3"]
 dev = [
   "httpx>=0.27,<1",
   "mypy>=1.10,<2",
@@ -44,6 +45,6 @@ strict = true
 packages = ["videogen_service"]
 
 [[tool.mypy.overrides]]
-# Optional extra — not installed unless director.provider is "anthropic".
-module = "anthropic.*"
+# Optional extras — installed only for the director provider in use.
+module = ["anthropic.*", "openai.*"]
 ignore_missing_imports = true

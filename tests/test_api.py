@@ -65,8 +65,17 @@ def make_director(tmp_path: Path, written: H3Prompt) -> PromptDirector:
             return written
 
     return PromptDirector(
-        Provider(),
-        settings=DirectorConfig(model="test-model", guide_file=tmp_path / "guide.md"),
+        {"claude": Provider(), "chatgpt": Provider()},
+        settings=DirectorConfig.model_validate(
+            {
+                "guide_file": tmp_path / "guide.md",
+                "default": "claude",
+                "providers": {
+                    "claude": {"provider": "anthropic", "model": "claude-opus-5"},
+                    "chatgpt": {"provider": "openai", "model": "gpt-test"},
+                },
+            }
+        ),
         renderer=RendererConfig(
             fps=24, min_seconds=5, max_seconds=15, max_total_seconds=120, max_shots=12
         ),
@@ -145,7 +154,7 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
             r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
         ),
-        "director": False,
+        "director": None,
     }
 
 
@@ -271,17 +280,47 @@ def test_enhance_returns_the_rewritten_prompt_and_its_warnings(tmp_path: Path) -
         director=make_director(tmp_path, written),
     )
     with TestClient(app) as client:
-        assert client.get("/health").json()["director"] is True
+        # Everything the control plane needs to draw the picker.
+        assert client.get("/health").json()["director"] == {
+            "default": "claude",
+            "providers": [
+                {"id": "chatgpt", "provider": "openai", "model": "gpt-test"},
+                {"id": "claude", "provider": "anthropic", "model": "claude-opus-5"},
+            ],
+        }
         response = client.post(
             "/v1/enhance", json={"mode": "t2v", "prompt": "晨雾里的山谷", "seconds": 6}
+        )
+        chosen = client.post(
+            "/v1/enhance",
+            json={
+                "mode": "t2v",
+                "prompt": "晨雾里的山谷",
+                "seconds": 6,
+                "provider": "chatgpt",
+            },
+        )
+        unknown = client.post(
+            "/v1/enhance",
+            json={
+                "mode": "t2v",
+                "prompt": "晨雾里的山谷",
+                "seconds": 6,
+                "provider": "gemini",
+            },
         )
 
     assert response.status_code == 200
     body = response.json()
     assert body["enhanced"] is True
+    assert body["provider"] == "claude"
     assert body["prompt"].startswith("integrated_multimodal_description: [Shot 1]")
     assert body["seconds"] == 158 / 24
     assert "nostalgic" in body["warnings"][0]
+    assert chosen.json()["provider"] == "chatgpt"
+    # Naming a writer that does not exist is the caller's mistake, not a
+    # degrade — it must not silently come back as the default's answer.
+    assert unknown.status_code == 400
 
 
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:

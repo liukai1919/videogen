@@ -45,11 +45,14 @@ class EnhanceRequest(StrictModel):
     mode: RenderMode
     prompt: str = Field(min_length=1, max_length=50_000)
     seconds: float = Field(gt=0)
+    # One of the ids /health advertises. Omitted means the configured default.
+    provider: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
 class EnhanceResponse(StrictModel):
     prompt: str
     enhanced: bool
+    provider: str
     fields: H3Prompt | None = None
     warnings: list[str] = Field(default_factory=list)
     seconds: float

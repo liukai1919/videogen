@@ -1,12 +1,14 @@
 import os
 from pathlib import Path
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 RenderMode = Literal["t2v", "i2v", "flf2v", "story"]
-DirectorProvider = Literal["anthropic", "ollama"]
+DirectorProvider = Literal["anthropic", "openai", "ollama"]
+_PROVIDER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
 class StrictModel(BaseModel):
@@ -41,26 +43,51 @@ class OllamaConfig(StrictModel):
     model: str
 
 
+class DirectorProviderConfig(StrictModel):
+    """One selectable writer. The key it is filed under is what the UI shows."""
+
+    provider: DirectorProvider
+    model: str
+    # Leave unset to let the SDK find its own credentials — ANTHROPIC_API_KEY or
+    # an `ant auth login` profile, OPENAI_API_KEY, and nothing at all for
+    # ollama. Name a variable here only to override that.
+    api_key_env: str | None = None
+    # Required for ollama; for the hosted providers this points them at a
+    # gateway or compatible endpoint instead of the vendor's own.
+    base_url: str | None = None
+    timeout_seconds: float = Field(gt=0, default=120.0)
+    # Reasoning counts against this on current models, so leave headroom.
+    max_tokens: int = Field(gt=0, default=16_000)
+
+    def api_key(self) -> str | None:
+        if self.api_key_env is None:
+            return None
+        return os.environ.get(self.api_key_env) or None
+
+
 class DirectorConfig(StrictModel):
     """Who rewrites plain language into H3's prompt format, and how it is checked."""
 
     enabled: bool = True
-    provider: DirectorProvider = "anthropic"
-    model: str
     guide_file: Path
-    # Only read when provider is "anthropic"; unset is fine, the SDK also
-    # resolves an `ant auth login` profile.
-    api_key_env: str = "ANTHROPIC_API_KEY"
-    # Only read when provider is "ollama".
-    base_url: str = "http://127.0.0.1:11434"
-    timeout_seconds: float = Field(gt=0, default=120.0)
-    # Thinking counts against this on current Claude models, so leave headroom.
-    max_tokens: int = Field(gt=0, default=16_000)
+    default: str
+    providers: dict[str, DirectorProviderConfig]
     max_attempts: int = Field(ge=1, le=5, default=2)
     require_verbatim_dialogue: bool = True
 
-    def api_key(self) -> str | None:
-        return os.environ.get(self.api_key_env) or None
+    @model_validator(mode="after")
+    def validate_providers(self) -> "DirectorConfig":
+        if not self.providers:
+            raise ValueError("director.providers must not be empty")
+        unusable = sorted(name for name in self.providers if not _PROVIDER_ID.match(name))
+        if unusable:
+            raise ValueError(f"director.providers keys must be [a-z0-9_-]: {unusable}")
+        if self.default not in self.providers:
+            raise ValueError(
+                f"director.default {self.default!r} is not one of "
+                f"{sorted(self.providers)}"
+            )
+        return self
 
 
 class ModeConfig(StrictModel):

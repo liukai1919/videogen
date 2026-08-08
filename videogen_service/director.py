@@ -12,7 +12,7 @@ submits whichever prompt it settles on, so a render stays reproducible from its
 recorded spec alone and a director outage can never block the GPU.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import hashlib
 import json
 import logging
@@ -23,7 +23,12 @@ from urllib.error import URLError
 import urllib.request
 
 from videogen_service.artifacts import write_json_atomic
-from videogen_service.config import DirectorConfig, RendererConfig, RenderMode
+from videogen_service.config import (
+    DirectorConfig,
+    DirectorProviderConfig,
+    RendererConfig,
+    RenderMode,
+)
 from videogen_service.models import EnhanceRequest, EnhanceResponse, H3Prompt
 from videogen_service.renderer import aligned_seconds
 
@@ -33,6 +38,7 @@ DIALOGUE = re.compile(r"<d>(.*?)</d>", re.DOTALL)
 LANGUAGE_TAG = re.compile(r"^\s*\[[^\]]+\]\s*")
 WORD = re.compile(r"[a-z]+")
 NOT_APPLICABLE = frozenset({"", "N/A", "NA", "NONE"})
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 # non_diegetic_music takes instruments, tempo, rhythm and dynamics. Naming the
 # feeling makes H3 score the adjective rather than the scene, so these are the
@@ -49,7 +55,11 @@ MOOD_WORDS = frozenset(
 
 
 class DirectorError(RuntimeError):
-    pass
+    """A provider failed. Recoverable: the caller degrades to the raw prompt."""
+
+
+class UnknownDirector(LookupError):
+    """The caller named a writer this service does not have. A client error."""
 
 
 class Director(Protocol):
@@ -160,45 +170,79 @@ class PromptDirector:
 
     def __init__(
         self,
-        provider: Director,
+        providers: Mapping[str, Director],
         *,
         settings: DirectorConfig,
         renderer: RendererConfig,
         cache_dir: Path,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._provider = provider
+        if not providers:
+            raise DirectorError("至少要有一个可用的导演")
+        self._providers = dict(providers)
         self._settings = settings
         self._renderer = renderer
         self._cache_dir = cache_dir
         self._logger = logger or logging.getLogger("videogen_service")
+        self._default = settings.default
+        if self._default not in self._providers:
+            self._default = sorted(self._providers)[0]
+            self._logger.warning(
+                "默认导演 %s 不可用,改用 %s", settings.default, self._default
+            )
+
+    @property
+    def catalogue(self) -> dict[str, object]:
+        """What the UI needs to render a picker — only writers that actually work."""
+        return {
+            "default": self._default,
+            "providers": [
+                {"id": name, "provider": entry.provider, "model": entry.model}
+                for name, entry in sorted(self._settings.providers.items())
+                if name in self._providers
+            ],
+        }
 
     def enhance(self, request: EnhanceRequest) -> EnhanceResponse:
+        name = request.provider or self._default
+        provider = self._providers.get(name)
+        if provider is None:
+            raise UnknownDirector(
+                f"没有名为 {name} 的导演,可选: {sorted(self._providers)}"
+            )
         seconds = aligned_seconds(request.seconds, fps=self._renderer.fps)
-        cached = self._read_cache(request, seconds=seconds)
+        cached = self._read_cache(request, name=name, seconds=seconds)
         if cached is not None:
             return cached
         try:
-            response = self._write(request, seconds=seconds)
+            response = self._write(request, provider=provider, name=name, seconds=seconds)
         except DirectorError as error:
             # Never block on the director: hand back the original prompt and let
             # the operator decide whether to submit it as-is.
-            self._logger.warning("提示词改写失败,退回原文: %s", error)
+            self._logger.warning("%s 改写提示词失败,退回原文: %s", name, error)
             return EnhanceResponse(
                 prompt=request.prompt,
                 enhanced=False,
+                provider=name,
                 fields=None,
-                warnings=[f"提示词改写失败,已退回原文: {error}"],
+                warnings=[f"{name} 改写失败,已退回原文: {error}"],
                 seconds=seconds,
             )
-        self._write_cache(request, seconds=seconds, response=response)
+        self._write_cache(request, name=name, seconds=seconds, response=response)
         return response
 
-    def _write(self, request: EnhanceRequest, *, seconds: float) -> EnhanceResponse:
+    def _write(
+        self,
+        request: EnhanceRequest,
+        *,
+        provider: Director,
+        name: str,
+        seconds: float,
+    ) -> EnhanceResponse:
         best: tuple[H3Prompt, list[str]] | None = None
         feedback: list[str] = []
         for _ in range(max(1, self._settings.max_attempts)):
-            prompt = self._provider.write(
+            prompt = provider.write(
                 idea=request.prompt,
                 seconds=seconds,
                 mode=request.mode,
@@ -219,22 +263,25 @@ class PromptDirector:
         prompt, warnings = best
         if warnings:
             self._logger.info(
-                "改写后的提示词仍有 %d 处不合规,已连同结果返回", len(warnings)
+                "%s 改写后仍有 %d 处不合规,已连同结果返回", name, len(warnings)
             )
         return EnhanceResponse(
             prompt=prompt.render(),
             enhanced=True,
+            provider=name,
             fields=prompt,
             warnings=warnings,
             seconds=seconds,
         )
 
-    def _cache_path(self, request: EnhanceRequest, *, seconds: float) -> Path:
+    def _cache_path(self, request: EnhanceRequest, *, name: str, seconds: float) -> Path:
+        settings = self._settings.providers[name]
         digest = hashlib.sha256(
             json.dumps(
                 [
-                    self._settings.provider,
-                    self._settings.model,
+                    name,
+                    settings.provider,
+                    settings.model,
                     self._settings.require_verbatim_dialogue,
                     request.mode,
                     request.prompt,
@@ -246,9 +293,9 @@ class PromptDirector:
         return self._cache_dir / f"{digest}.json"
 
     def _read_cache(
-        self, request: EnhanceRequest, *, seconds: float
+        self, request: EnhanceRequest, *, name: str, seconds: float
     ) -> EnhanceResponse | None:
-        path = self._cache_path(request, seconds=seconds)
+        path = self._cache_path(request, name=name, seconds=seconds)
         if not path.is_file():
             return None
         try:
@@ -258,30 +305,68 @@ class PromptDirector:
             return None
 
     def _write_cache(
-        self, request: EnhanceRequest, *, seconds: float, response: EnhanceResponse
+        self,
+        request: EnhanceRequest,
+        *,
+        name: str,
+        seconds: float,
+        response: EnhanceResponse,
     ) -> None:
         try:
             write_json_atomic(
-                self._cache_path(request, seconds=seconds), response.model_dump()
+                self._cache_path(request, name=name, seconds=seconds),
+                response.model_dump(),
             )
         except OSError as error:
             self._logger.warning("提示词缓存写入失败: %s", error)
 
 
 def build_guide(settings: DirectorConfig) -> str:
-    if settings.guide_file is None:
-        raise DirectorError("director.guide_file 未配置")
     try:
         return settings.guide_file.read_text(encoding="utf-8")
     except OSError as error:
         raise DirectorError(f"读不到提示词指南: {settings.guide_file}") from error
 
 
-def build_director(settings: DirectorConfig) -> Director:
-    guide = build_guide(settings)
+def build_director(settings: DirectorProviderConfig, *, guide: str) -> Director:
     if settings.provider == "anthropic":
         return AnthropicDirector(settings, guide=guide)
+    if settings.provider == "openai":
+        return OpenAIDirector(settings, guide=guide)
     return OllamaDirector(settings, guide=guide)
+
+
+def build_directors(
+    settings: DirectorConfig, *, logger: logging.Logger | None = None
+) -> dict[str, Director]:
+    """Build what can be built. A writer that cannot start is dropped, not fatal.
+
+    Constructing a provider reaches for an optional SDK and for credentials —
+    the OpenAI client refuses to exist without a key — and a rewriter this
+    service can live without must never be the reason it fails to boot. The
+    ones that survive are exactly the ones the picker offers.
+    """
+    log = logger or logging.getLogger("videogen_service")
+    guide = build_guide(settings)
+    built: dict[str, Director] = {}
+    for name, entry in settings.providers.items():
+        try:
+            built[name] = build_director(entry, guide=guide)
+        except Exception as error:  # missing SDK, missing key, bad base_url
+            log.warning(
+                "导演 %s (%s) 起不来,已从可选项里去掉: %s", name, entry.provider, error
+            )
+    return built
+
+
+def _client_options(settings: DirectorProviderConfig) -> dict[str, Any]:
+    options: dict[str, Any] = {"timeout": settings.timeout_seconds}
+    key = settings.api_key()
+    if key is not None:
+        options["api_key"] = key
+    if settings.base_url is not None:
+        options["base_url"] = settings.base_url
+    return options
 
 
 def _task(idea: str, *, seconds: float, mode: RenderMode, feedback: Sequence[str]) -> str:
@@ -306,20 +391,15 @@ def _task(idea: str, *, seconds: float, mode: RenderMode, feedback: Sequence[str
 class AnthropicDirector:
     """Claude with structured outputs, so only the content rules need checking."""
 
-    def __init__(self, settings: DirectorConfig, *, guide: str) -> None:
+    def __init__(self, settings: DirectorProviderConfig, *, guide: str) -> None:
         import anthropic
 
         self._anthropic = anthropic
         self._settings = settings
         self._guide = guide
-        key = settings.api_key()
-        self._client = (
-            anthropic.Anthropic(api_key=key, timeout=settings.timeout_seconds)
-            if key is not None
-            # No key in the environment is not an error: the SDK also resolves
-            # an `ant auth login` profile.
-            else anthropic.Anthropic(timeout=settings.timeout_seconds)
-        )
+        # No key here is not an error: the SDK also resolves ANTHROPIC_API_KEY
+        # and an `ant auth login` profile on its own.
+        self._client = anthropic.Anthropic(**_client_options(settings))
 
     def write(
         self,
@@ -365,12 +445,77 @@ class AnthropicDirector:
         return parsed
 
 
+class OpenAIDirector:
+    """ChatGPT over chat completions, so an OpenAI-compatible gateway works too."""
+
+    def __init__(self, settings: DirectorProviderConfig, *, guide: str) -> None:
+        import openai
+
+        self._openai = openai
+        self._settings = settings
+        self._guide = guide
+        self._client = openai.OpenAI(**_client_options(settings))
+
+    def write(
+        self,
+        *,
+        idea: str,
+        seconds: float,
+        mode: RenderMode,
+        feedback: Sequence[str],
+    ) -> H3Prompt:
+        try:
+            completion = self._client.chat.completions.create(
+                model=self._settings.model,
+                max_completion_tokens=self._settings.max_tokens,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "h3_prompt",
+                        "strict": True,
+                        "schema": H3Prompt.model_json_schema(),
+                    },
+                },
+                messages=[
+                    {"role": "system", "content": self._guide},
+                    {
+                        "role": "user",
+                        "content": _task(
+                            idea, seconds=seconds, mode=mode, feedback=feedback
+                        ),
+                    },
+                ],
+            )
+        except self._openai.APIStatusError as error:
+            raise DirectorError(
+                f"ChatGPT 返回 HTTP {error.status_code}: {error}"
+            ) from error
+        except self._openai.APIConnectionError as error:
+            raise DirectorError(f"连接 ChatGPT 失败: {error}") from error
+        if not completion.choices:
+            raise DirectorError("ChatGPT 没有返回任何候选")
+        choice = completion.choices[0]
+        if choice.message.refusal:
+            raise DirectorError(f"ChatGPT 拒绝了这次改写: {choice.message.refusal}")
+        if choice.finish_reason == "length":
+            # Silently truncated JSON parses as garbage; say what actually broke.
+            raise DirectorError("ChatGPT 输出被 max_tokens 截断,调大 director 的 max_tokens")
+        content = choice.message.content
+        if not isinstance(content, str):
+            raise DirectorError("ChatGPT 没有返回文本内容")
+        try:
+            return H3Prompt.model_validate_json(content)
+        except ValueError as error:
+            raise DirectorError(f"ChatGPT 没有按三字段结构返回: {error}") from error
+
+
 class OllamaDirector:
     """The local path — no API key, no new dependency, same seam."""
 
-    def __init__(self, settings: DirectorConfig, *, guide: str) -> None:
+    def __init__(self, settings: DirectorProviderConfig, *, guide: str) -> None:
         self._settings = settings
         self._guide = guide
+        self._base_url = settings.base_url or OLLAMA_BASE_URL
 
     def write(
         self,
@@ -399,7 +544,7 @@ class OllamaDirector:
             ensure_ascii=False,
         ).encode("utf-8")
         request = urllib.request.Request(
-            f"{self._settings.base_url.rstrip('/')}/api/chat",
+            f"{self._base_url.rstrip('/')}/api/chat",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",

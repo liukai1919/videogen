@@ -87,7 +87,9 @@ class RenderService:
             "length_step": LENGTH_STEP,
             "length_offset": LENGTH_OFFSET,
             "shot_header_pattern": SHOT_HEADER.pattern,
-            "director": self._director is not None,
+            # None when no writer is configured; otherwise the picker the
+            # control plane renders, default first.
+            "director": None if self._director is None else self._director.catalogue,
         }
 
     def enhance(self, request: EnhanceRequest) -> EnhanceResponse:

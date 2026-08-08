@@ -28,21 +28,29 @@ director:
   # POST /v1/enhance, never inside a render, so a render stays reproducible from
   # its recorded spec and an outage here can never block the GPU.
   enabled: true
-  provider: "anthropic"        # anthropic | ollama
-  model: "claude-opus-5"
   guide_file: "./prompts/h3_prompt_guide.md"
-  api_key_env: "ANTHROPIC_API_KEY"
   # Reject a rewrite that changes the user's dialogue. H3 speaks whatever is
   # inside <d> verbatim, so a paraphrase there is a wrong take.
   require_verbatim_dialogue: true
   # One retry, feeding the failed checks back as corrections.
   max_attempts: 2
-  #
-  # To run the local model through the same seam instead — no API key, no extra
-  # dependency, and a useful A/B against the cloud provider:
-  # provider: "ollama"
-  # model: "qwen3.6:27b"
-  # base_url: "http://127.0.0.1:11434"
+  # Used when POST /v1/enhance does not name one.
+  default: "claude"
+  # Every key here becomes a choice in the control plane's picker; GET /health
+  # lists them. Add the same provider twice under different keys to A/B two
+  # models. api_key_env is only needed to override the SDK's own variable
+  # (ANTHROPIC_API_KEY, OPENAI_API_KEY); base_url only to reach a gateway.
+  providers:
+    claude:
+      provider: "anthropic"     # needs: pip install -e ".[anthropic]"
+      model: "claude-opus-5"
+    chatgpt:
+      provider: "openai"        # needs: pip install -e ".[openai]"
+      model: "gpt-5.1"          # set this to the model you actually have
+    local:
+      provider: "ollama"        # no key, no extra dependency
+      model: "qwen3.6:27b"
+      base_url: "http://127.0.0.1:11434"
 
 modes:
   t2v:
