@@ -31,7 +31,7 @@ dev = [
 include = ["videogen_service*"]
 
 [tool.setuptools.package-data]
-videogen_service = ["py.typed"]
+videogen_service = ["py.typed", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -61,7 +61,36 @@ class RenderRecord(StrictModel):
     progress: RenderProgress | None = None
     error: str | None = None
     created_at: str
+    # Stamped each time the worker picks the render up, so the console can show
+    # how long the card has been busy without counting queue time. Absent in
+    # state files written before the console existed.
+    started_at: str | None = None
     updated_at: str
+
+
+class RenderSummary(StrictModel):
+    """A render as the console lists it: state plus the spec that produced it.
+
+    Kept apart from RenderView because that one is a frozen contract with the
+    sibling control plane, which rejects fields it does not know.
+    """
+
+    render_id: str
+    status: RenderStatus
+    progress: RenderProgress | None = None
+    error: str | None = None
+    media_url: str | None = None
+    mode: RenderMode
+    prompt: str
+    width: int
+    height: int
+    seconds: float
+    seed: int | None = None
+    has_first_frame: bool = False
+    has_last_frame: bool = False
+    created_at: str
+    updated_at: str
+    elapsed_seconds: float | None = None
 
 
 class ScriptRequest(StrictModel):

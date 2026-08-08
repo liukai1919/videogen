@@ -1,13 +1,15 @@
 # VideoTube Videogen
 
-VideoTube Studio 的独立本地渲染服务。它拥有 MiniMax H3、ComfyUI workflow、参考帧副本、渲染进度和渲染产物；原来的 `vediotube` 项目继续拥有网页、用户任务、预览副本和 B 站投稿。
+VideoTube Studio 的独立本地渲染服务。它拥有 MiniMax H3、ComfyUI workflow、参考帧副本、渲染进度和渲染产物；原来的 `videotube` 项目继续拥有自动化流水线、用户任务、预览副本和 B 站投稿；视频生成台这一页已经搬到本项目。
 
 ```text
-浏览器 → vediotube:8000 → 本服务:8020 → ComfyUI:8188
-                └────────→ B 站投稿
+浏览器 → 本服务:8020 → ComfyUI:8188
+              ↑
+   videotube:8000 ─┘（流水线的渲染，仍走同一条 /v1 seam）
+              └────→ B 站投稿
 ```
 
-这个边界刻意保持同步：原项目提交一个远端 render，轮询状态，完成后把 MP4 下载回自己的 `work/videogen/`。因此现有前端 URL、SQLite 任务记录和发布流程都不用改。
+浏览器现在直接对着本服务：手工生成的那条路不再经过 `videotube`。`videotube` 的自动化流水线还是老样子——提交一个远端 render，轮询状态，完成后把 MP4 下载回自己的 `work/videogen/`，所以它的任务记录和发布流程都不用改。`/health`、`/v1/validate`、`/v1/renders` 这几个它在用的字段因此是冻结的契约。
 
 ## 安装
 
@@ -43,7 +45,7 @@ WSL2：
 .wsl-venv/bin/videogen-service --config config.yaml
 ```
 
-默认只监听 `127.0.0.1:8020`。确认 `http://127.0.0.1:8020/health` 返回 `status: ok` 后，再启动 `vediotube` 的 Web 控制台并打开 `http://127.0.0.1:8000/videogen`。
+默认只监听 `127.0.0.1:8020`。启动后直接打开 `http://127.0.0.1:8020/` 就是视频生成台——页面由本服务自己提供，不再需要先起 `videotube` 的 Web 控制台。
 
 ## 配置归属
 
@@ -54,17 +56,27 @@ WSL2：
 
 ## HTTP seam
 
-- `GET /health`：模式、分镜模式和限制，外加 `script` 段的字幕总结配置。
+- `GET /`、`GET /static/*`：视频生成台页面和它的三个静态文件。
+- `GET /health`：模式、分镜模式和限制。字段是和 `videotube` 之间的固定契约（那边用 `extra="forbid"` 解析），新东西一律不要往里加。
+- `GET /v1/scripts/config`：字幕总结的配置，页面用它决定默认时长和分镜数。
 - `POST /v1/scripts`：传一个 YouTube 网址，取字幕、让 Ollama 总结成分镜脚本。
+- `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
 - `GET /v1/renders/{render_id}`：读取队列、进度或失败原因。
 - `GET /v1/renders/{render_id}/media`：下载完成的 MP4。
+- `POST /v1/renders/{render_id}/retry`：用磁盘上的原请求重排一条失败的渲染。
 - `DELETE /v1/renders/{render_id}`：删除终态渲染及其参考帧。
+
+## 视频生成台
+
+生成台的前端从 `videotube` 搬了过来，现在住在 `videogen_service/static/`：页面、样式和一份精简过的 `ui.js`，本服务直接把它们发出去。搬过来的只有跟视频生成有关的那一页——仪表盘、发布审核、B 站投稿的模板和样式都留在原项目，投稿仍旧是那边的事。
+
+前端因此直接说本服务的 `/v1` 语言，不再经过控制台转发：任务 id 由页面自己生成，任务列表读 `GET /v1/renders`，失败重试打 `POST /v1/renders/{id}/retry`，视频从 `/v1/renders/{id}/media` 播。`videotube` 那份 `/videogen` 页面和它的 `/api/videogen/*` 路由现在是重复的，要不要下掉由那个项目自己决定；两边同时开着也不会打架，任务状态只有本服务这一份。
 
 ## 原创科普：从 YouTube 网址到分镜
 
-`POST /v1/scripts` 把一条 YouTube 链接变成可以直接提交渲染的分镜脚本，分两步走，中间留出人工审阅：
+`POST /v1/scripts` 把一条 YouTube 链接变成可以直接提交渲染的分镜脚本，分两步走，中间留出人工审阅。页面左上角的"从 YouTube 网址起稿"就是它，命令行等价物：
 
 ```bash
 curl -s http://127.0.0.1:8020/v1/scripts \

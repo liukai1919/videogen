@@ -120,6 +120,19 @@ class FakeRenderer:
         return b"FAKE-MP4"
 
 
+class FailingOnceRenderer(FakeRenderer):
+    def render(
+        self,
+        request: RenderRequest,
+        *,
+        on_progress: Callable[[RenderProgress], None] | None = None,
+    ) -> bytes:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise RuntimeError("ComfyUI 掉线了")
+        return b"FAKE-MP4"
+
+
 class BlockingRenderer(FakeRenderer):
     def __init__(self) -> None:
         super().__init__()
@@ -167,14 +180,6 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
             r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
         ),
-        "script": {
-            "enabled": True,
-            "model": "qwen3.6:27b",
-            "subtitle_languages": ["zh-Hans", "zh", "en"],
-            "target_seconds": 60.0,
-            "shot_seconds": 6.0,
-            "max_shots": 8,
-        },
     }
 
 
@@ -308,6 +313,115 @@ def test_a_link_that_is_not_youtube_is_rejected(tmp_path: Path) -> None:
         response = client.post("/v1/scripts", json={"url": "https://vimeo.com/12345"})
 
     assert response.status_code == 400
+
+
+def test_health_stays_byte_compatible_with_the_control_plane(tmp_path: Path) -> None:
+    # The sibling project parses /health with extra="forbid", so console-only
+    # settings live on their own endpoint instead of being folded in here.
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        health = client.get("/health").json()
+        script = client.get("/v1/scripts/config").json()
+
+    assert "script" not in health
+    assert script["enabled"] is True
+    assert script["model"] == "qwen3.6:27b"
+    assert script["max_shots"] == 8
+
+
+def test_the_console_lists_renders_with_the_spec_that_made_them(
+    tmp_path: Path,
+) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_listed",
+                "mode": "t2v",
+                "prompt": "晨雾中的山谷",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+        )
+        assert wait_for_done(client, "vg_listed")["status"] == "DONE"
+        listed = client.get("/v1/renders")
+
+    assert listed.status_code == 200
+    jobs = listed.json()
+    assert len(jobs) == 1
+    assert jobs[0]["render_id"] == "vg_listed"
+    assert jobs[0]["prompt"] == "晨雾中的山谷"
+    assert jobs[0]["mode"] == "t2v"
+    assert jobs[0]["width"] == 864
+    assert jobs[0]["media_url"] == "/v1/renders/vg_listed/media"
+    assert jobs[0]["created_at"]
+    assert jobs[0]["elapsed_seconds"] is None
+
+
+def test_a_failed_render_is_retried_from_the_stored_request(tmp_path: Path) -> None:
+    renderer = FailingOnceRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_retry",
+                "mode": "i2v",
+                "prompt": "让湖面泛起涟漪",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+            files={"first_frame": ("first.png", b"PNG", "image/png")},
+        )
+        assert wait_for_done(client, "vg_retry")["status"] == "FAILED"
+        retried = client.post("/v1/renders/vg_retry/retry")
+        state = wait_for_done(client, "vg_retry")
+
+    assert retried.status_code == 202
+    assert state["status"] == "DONE"
+    # The reference frame is re-read from disk, not re-uploaded by the browser.
+    second = renderer.requests[1]
+    assert second.first_frame is not None
+    assert second.first_frame.read_bytes() == b"PNG"
+
+
+def test_an_in_flight_render_cannot_be_retried(tmp_path: Path) -> None:
+    renderer = BlockingRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_busy",
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+        )
+        assert renderer.started.wait(1)
+        conflict = client.post("/v1/renders/vg_busy/retry")
+        renderer.release.set()
+        wait_for_done(client, "vg_busy")
+
+    assert conflict.status_code == 409
+
+
+def test_the_console_page_and_its_assets_are_served(tmp_path: Path) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        page = client.get("/")
+        script = client.get("/static/videogen.js")
+        style = client.get("/static/app.css")
+        traversal = client.get("/static/../config.yaml")
+        unknown = client.get("/static/secrets.txt")
+
+    assert page.status_code == 200
+    assert "视频生成" in page.text
+    assert script.status_code == 200
+    assert "/v1/scripts" in script.text
+    assert style.status_code == 200
+    assert traversal.status_code == 404
+    assert unknown.status_code == 404
 
 
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
