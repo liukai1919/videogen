@@ -4,29 +4,53 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import ValidationError
 from urllib.parse import urlparse
 
 from videogen_service.config import ServiceConfig, load_config
 from videogen_service.models import (
     RenderSpec,
+    RenderSummary,
     RenderValidation,
     RenderValidationRequest,
     RenderView,
+    ScriptRequest,
+    ScriptResult,
 )
 from videogen_service.renderer import H3Renderer, RenderError, Renderer
+from videogen_service.scripting import ScriptError, ScriptStudio, ScriptUnavailable
 from videogen_service.service import RenderConflict, RenderNotFound, RenderService
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
+_STATIC_DIR = Path(__file__).parent / "static"
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+}
+
+
+def _static_file(name: str, media_type: str) -> FileResponse:
+    # Serving by name from a fixed table keeps the console's few assets out of
+    # reach of path traversal without pulling in a whole static-files mount.
+    path = _STATIC_DIR / name
+    if Path(name).name != name or not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-cache"})
 
 
 def create_app(
-    config: ServiceConfig | None = None, *, renderer: Renderer | None = None
+    config: ServiceConfig | None = None,
+    *,
+    renderer: Renderer | None = None,
+    studio: ScriptStudio | None = None,
 ) -> FastAPI:
     settings = config or load_config()
-    service = RenderService(settings, renderer or H3Renderer(settings))
+    service = RenderService(
+        settings, renderer or H3Renderer(settings), studio=studio
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -47,6 +71,17 @@ def create_app(
             return PlainTextResponse("cross-site request refused", status_code=403)
         return await call_next(request)
 
+    @app.get("/", response_class=HTMLResponse)
+    def console() -> FileResponse:
+        return _static_file("videogen.html", "text/html; charset=utf-8")
+
+    @app.get("/static/{name}")
+    def static_file(name: str) -> FileResponse:
+        media_type = _STATIC_TYPES.get(Path(name).suffix)
+        if media_type is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return _static_file(name, media_type)
+
     @app.get("/health")
     def health() -> dict[str, object]:
         return service.health()
@@ -56,6 +91,21 @@ def create_app(
         try:
             return service.validate(request)
         except RenderError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/scripts/config")
+    def script_config() -> dict[str, object]:
+        return service.script_config()
+
+    @app.post("/v1/scripts", response_model=ScriptResult)
+    def script(request: ScriptRequest) -> ScriptResult:
+        # Captions and the local LLM both take minutes; FastAPI runs this sync
+        # handler on its worker threads, so the render queue keeps draining.
+        try:
+            return service.script(request)
+        except ScriptUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except (ScriptError, RenderError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post(
@@ -97,6 +147,23 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValidationError as error:
             raise HTTPException(status_code=422, detail=error.errors()) from error
+
+    @app.get("/v1/renders", response_model=list[RenderSummary])
+    def list_renders() -> list[RenderSummary]:
+        return service.list_renders()
+
+    @app.post(
+        "/v1/renders/{render_id}/retry",
+        response_model=RenderView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def retry_render(render_id: str) -> RenderView:
+        try:
+            return service.retry(render_id)
+        except RenderNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RenderConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.get("/v1/renders/{render_id}", response_model=RenderView)
     def get_render(render_id: str) -> RenderView:

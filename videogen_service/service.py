@@ -15,9 +15,12 @@ from videogen_service.models import (
     RenderRecord,
     RenderRequest,
     RenderSpec,
+    RenderSummary,
     RenderValidation,
     RenderValidationRequest,
     RenderView,
+    ScriptRequest,
+    ScriptResult,
 )
 from videogen_service.renderer import (
     LENGTH_OFFSET,
@@ -26,6 +29,7 @@ from videogen_service.renderer import (
     Renderer,
     validate_render,
 )
+from videogen_service.scripting import ScriptStudio
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _RENDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -42,9 +46,16 @@ class RenderConflict(RuntimeError):
 class RenderService:
     """Owns durable render execution behind the HTTP service boundary."""
 
-    def __init__(self, config: ServiceConfig, renderer: Renderer) -> None:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        renderer: Renderer,
+        *,
+        studio: ScriptStudio | None = None,
+    ) -> None:
         self._config = config
         self._renderer = renderer
+        self._studio = studio or ScriptStudio(config)
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
@@ -76,6 +87,20 @@ class RenderService:
             "shot_header_pattern": SHOT_HEADER.pattern,
         }
 
+    def script_config(self) -> dict[str, object]:
+        # Deliberately not folded into /health: the sibling control plane parses
+        # that payload with extra="forbid", so it is a frozen contract.
+        settings = self._config.script
+        return {
+            "enabled": settings.enabled,
+            "model": settings.model or self._config.ollama.model,
+            "subtitle_languages": list(settings.subtitle_languages),
+            "target_seconds": settings.target_seconds,
+            "shot_seconds": settings.shot_seconds,
+            "max_shots": settings.max_shots,
+            "max_source_seconds": settings.max_source_seconds,
+        }
+
     def close(self) -> None:
         with self._state_lock:
             self._closing.set()
@@ -103,6 +128,9 @@ class RenderService:
             has_first_frame=request.has_first_frame,
             has_last_frame=request.has_last_frame,
         )
+
+    def script(self, request: ScriptRequest) -> ScriptResult:
+        return self._studio.create(request)
 
     def submit(
         self,
@@ -163,6 +191,47 @@ class RenderService:
                 raise RenderNotFound(f"render {render_id} 不存在")
             return self._view(record)
 
+    def list_renders(self) -> list[RenderSummary]:
+        """Newest first, for the console's job list."""
+        with self._state_lock:
+            summaries: list[RenderSummary] = []
+            for path in self._config.work_dir.glob("*/state.json"):
+                record = self._read_record(path)
+                if record is None or record.render_id != path.parent.name:
+                    continue
+                request = self._read_request(path.parent)
+                if request is None:
+                    continue
+                summaries.append(self._summary(record, request))
+        summaries.sort(key=lambda summary: summary.created_at, reverse=True)
+        return summaries
+
+    def retry(self, render_id: str) -> RenderView:
+        """Re-queue a finished render from the request already on disk."""
+        with self._state_lock:
+            if self._closing.is_set():
+                raise RenderConflict("渲染服务正在关闭")
+            record = self._load_record(render_id)
+            if record is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            if record.status in {"QUEUED", "RUNNING"}:
+                raise RenderConflict("这条任务还在队列里")
+            request = self._read_request(self._render_dir(render_id))
+            if request is None:
+                raise RenderNotFound(f"render {render_id} 的请求已经不在了")
+            self._save_record(
+                record.model_copy(
+                    update={
+                        "status": "QUEUED",
+                        "progress": None,
+                        "error": None,
+                        "updated_at": _now(),
+                    }
+                )
+            )
+            self._queue.put(request)
+        return self.get(render_id)
+
     def media_path(self, render_id: str) -> Path:
         with self._state_lock:
             record = self._load_record(render_id)
@@ -210,6 +279,7 @@ class RenderService:
                         "status": "RUNNING",
                         "progress": None,
                         "error": None,
+                        "started_at": _now(),
                         "updated_at": _now(),
                     }
                 ),
@@ -303,13 +373,23 @@ class RenderService:
         write_bytes_atomic(destination, data)
         return destination
 
+    def _read_record(self, path: Path) -> RenderRecord | None:
+        try:
+            return RenderRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _read_request(self, directory: Path) -> RenderRequest | None:
+        path = directory / "request.json"
+        try:
+            return RenderRequest.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def _recover_interrupted(self) -> None:
         for path in self._config.work_dir.glob("*/state.json"):
-            try:
-                record = RenderRecord.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
+            record = self._read_record(path)
+            if record is None:
                 continue
             if record.render_id != path.parent.name or not _RENDER_ID.fullmatch(
                 record.render_id
@@ -348,6 +428,24 @@ class RenderService:
         )
 
     @staticmethod
+    def _summary(record: RenderRecord, request: RenderRequest) -> RenderSummary:
+        view = RenderService._view(record)
+        return RenderSummary(
+            **view.model_dump(),
+            mode=request.mode,
+            prompt=request.prompt,
+            width=request.width,
+            height=request.height,
+            seconds=request.seconds,
+            seed=request.seed,
+            has_first_frame=request.first_frame is not None,
+            has_last_frame=request.last_frame is not None,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            elapsed_seconds=_elapsed_seconds(record),
+        )
+
+    @staticmethod
     def _view(record: RenderRecord) -> RenderView:
         return RenderView(
             render_id=record.render_id,
@@ -382,3 +480,14 @@ def _fingerprint(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _elapsed_seconds(record: RenderRecord) -> float | None:
+    """How long an in-flight render has been on the card, for the progress bar."""
+    if record.status != "RUNNING" or record.started_at is None:
+        return None
+    try:
+        started = datetime.fromisoformat(record.started_at)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(UTC) - started).total_seconds())

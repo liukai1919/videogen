@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>视频生成 · VideoTube Videogen</title>
+    <!-- Inline so the page needs no extra route just to stop a 404 in the console. -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%237c5cff'/><path d='M6 4.5l5 3.5-5 3.5z' fill='white'/></svg>">
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <span class="brand-name">VideoTube Videogen</span>
+          <span class="brand-sub">本地 MiniMax H3 渲染台</span>
+        </div>
+        <nav class="sidebar-nav">
+          <a href="/" aria-current="page">视频生成</a>
+        </nav>
+        <div class="sidebar-footer">
+          <span class="health-pill" data-health-service>检测中…</span>
+          <span class="health-pill" data-health-script>字幕总结 …</span>
+        </div>
+      </aside>
+
+      <div class="app-main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <button type="button" class="nav-toggle" data-nav-toggle aria-expanded="false" aria-label="打开导航">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <div>
+              <h1>视频生成</h1>
+              <p>本地 MiniMax H3 · 单段 5–15 秒</p>
+            </div>
+          </div>
+        </header>
+
+        <div class="page-content">
+          <div class="vg-workspace" id="vg-workspace">
+            <section class="card vg-compose" id="compose">
+              <div class="card-header">
+                <h2>生成参数</h2>
+              </div>
+
+              <details class="advanced-block" id="source-block" open>
+                <summary>从 YouTube 网址起稿</summary>
+                <div class="advanced-body">
+                  <p class="hint">
+                    取目标视频的字幕，用本机的 Ollama 总结成分镜脚本，填进下面的提示词。
+                    只花 CPU，不动显卡；生成与否还是下面那个按钮说了算。
+                  </p>
+                  <label class="field">
+                    <span class="field-label">YouTube 链接</span>
+                    <input type="url" id="source-url" class="field-input"
+                      placeholder="https://www.youtube.com/watch?v=…">
+                  </label>
+                  <div class="form-grid">
+                    <label class="field">
+                      <span class="field-label">目标时长（秒）</span>
+                      <input type="number" id="source-target" class="field-input" value="60" min="5" step="5">
+                    </label>
+                    <label class="field">
+                      <span class="field-label">最多分镜</span>
+                      <input type="number" id="source-max-shots" class="field-input" value="8" min="1" step="1">
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">额外要求（可留空）</span>
+                    <input type="text" id="source-guidance" class="field-input"
+                      placeholder="例如：面向初中生，多讲生活里的例子">
+                  </label>
+                  <div id="source-notice" role="status"></div>
+                  <button type="button" id="source-button" class="button button-secondary button-block">
+                    取字幕并生成分镜
+                  </button>
+                  <div class="vg-source-result" id="source-result" hidden>
+                    <strong id="source-title"></strong>
+                    <p class="subtle" id="source-meta"></p>
+                    <p class="subtle" id="source-summary"></p>
+                    <details id="narration-block" hidden>
+                      <summary>解说词（配音用，不进画面）</summary>
+                      <ol class="vg-narration" id="narration-list"></ol>
+                    </details>
+                  </div>
+                </div>
+              </details>
+
+              <form id="generate-form" class="form-stack">
+                <label class="field">
+                  <span class="field-label">模式</span>
+                  <select name="mode" id="mode" class="field-input">
+                    <option value="t2v">文生视频</option>
+                    <option value="i2v">图生视频（首帧）</option>
+                    <option value="flf2v">首尾帧</option>
+                    <option value="story">分镜长片</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span class="field-label">提示词</span>
+                  <textarea name="prompt" id="prompt" rows="7" required
+                    placeholder="镜头描述。支持时间轴写法，逐段指挥：&#10;[0s-2s] 雾气里的山谷缓慢推近&#10;[2s-5s] 光线穿过树冠，镜头上摇"></textarea>
+                  <p class="hint" id="story-hint" hidden>
+                    分镜长片会把每个 <code>[a s-b s]</code> 段单独跑一次采样再拼成一条片子，
+                    段前没带时间的文字当成全片统一的画面风格，会自动带进每一段。
+                    <br><strong id="story-summary"></strong>
+                  </p>
+                </label>
+
+                <div class="form-stack" id="frame-fields" hidden>
+                  <label class="field">
+                    <span class="field-label">首帧图片</span>
+                    <input type="file" name="first_frame" id="first-frame" accept="image/*">
+                    <div class="frame-preview" id="first-frame-preview" hidden>
+                      <img alt="首帧预览" id="first-frame-img">
+                      <span class="frame-name" id="first-frame-name"></span>
+                    </div>
+                  </label>
+                  <label class="field" id="last-frame-field" hidden>
+                    <span class="field-label">尾帧图片</span>
+                    <input type="file" name="last_frame" id="last-frame" accept="image/*">
+                    <div class="frame-preview" id="last-frame-preview" hidden>
+                      <img alt="尾帧预览" id="last-frame-img">
+                      <span class="frame-name" id="last-frame-name"></span>
+                    </div>
+                  </label>
+                </div>
+
+                <div class="field">
+                  <span class="field-label">比例快捷</span>
+                  <div class="ratio-presets" role="group" aria-label="画面比例">
+                    <button type="button" data-ratio="16:9" data-w="864" data-h="480" aria-pressed="true">16:9</button>
+                    <button type="button" data-ratio="9:16" data-w="480" data-h="864" aria-pressed="false">9:16</button>
+                    <button type="button" data-ratio="1:1" data-w="640" data-h="640" aria-pressed="false">1:1</button>
+                  </div>
+                </div>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span class="field-label">宽</span>
+                    <input type="number" name="width" id="width" value="864" min="256" max="2048" step="32" required>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">高</span>
+                    <input type="number" name="height" id="height" value="480" min="256" max="2048" step="32" required>
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span class="field-label" id="seconds-label">时长（秒）</span>
+                  <input type="number" name="seconds" id="seconds" value="5" min="5" max="15" step="0.5" required>
+                </label>
+
+                <details class="advanced-block">
+                  <summary>高级参数</summary>
+                  <div class="advanced-body">
+                    <label class="field">
+                      <span class="field-label">随机种子（留空则按任务 ID 固定）</span>
+                      <input type="number" name="seed" id="seed" min="0" placeholder="自动">
+                    </label>
+                    <p class="hint" id="length-hint"></p>
+                  </div>
+                </details>
+
+                <div id="compose-notice" role="status"></div>
+                <button type="submit" id="generate-button" class="button button-primary button-block">开始生成</button>
+              </form>
+            </section>
+
+            <section class="card vg-gallery-card">
+              <div class="card-header">
+                <h2>生成任务</h2>
+              </div>
+              <div class="vg-toolbar" id="bulk-bar" hidden>
+                <label class="select-all"><input type="checkbox" id="select-all"> 全选</label>
+                <span class="selected-count" id="selected-count">未选中</span>
+                <span class="spacer"></span>
+                <button type="button" class="button button-danger" id="bulk-delete" disabled>删除所选</button>
+              </div>
+              <div id="job-list" class="media-grid"><div class="empty">正在加载…</div></div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/ui.js"></script>
+    <script src="/static/videogen.js"></script>
+  </body>
+</html>
