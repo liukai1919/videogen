@@ -1,4 +1,4 @@
-# 在 Windows 上一键把本服务启动到 WSL 里。
+﻿# 在 Windows 上一键把本服务启动到 WSL 里。
 #
 #   .\start-wsl.ps1                 # 启动，默认 8020
 #   .\start-wsl.ps1 -Check          # 只自检不启动

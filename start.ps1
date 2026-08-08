@@ -1,4 +1,4 @@
-# 启动 VideoTube Videogen(Windows PowerShell)。
+﻿# 启动 VideoTube Videogen(Windows PowerShell)。
 #
 #   .\start.ps1              # 装好依赖并启动，默认 8020
 #   .\start.ps1 -Check       # 只自检不启动

@@ -1,6 +1,11 @@
 @echo off
-rem 双击就能用的入口:绕开 PowerShell 的执行策略，直接调用 start-wsl.ps1。
-rem 命令行参数照样透传: start-wsl.cmd -Check / -Port 8030
+rem Double-click entry point: runs start-wsl.ps1 with the execution policy bypassed.
+rem Arguments pass straight through:  start-wsl.cmd -Check   /   start-wsl.cmd -Port 8030
+rem
+rem Kept strictly ASCII on purpose. cmd.exe reads a .bat/.cmd in the console's OEM
+rem code page (936 on a Chinese Windows), so UTF-8 Chinese here is re-read as GBK
+rem and the mangled bytes can contain 0x26 "&", which ends the rem and runs the
+rem rest as a command. A comment must never be able to do that.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-wsl.ps1" %*
-rem 双击运行时窗口会在出错后立刻关掉，什么都看不到，所以失败才停一下。
+rem A double-clicked window closes instantly on failure, so hold it open to read the error.
 if errorlevel 1 pause
