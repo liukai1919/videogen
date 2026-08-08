@@ -114,15 +114,98 @@ def test_storyboard_values_carry_timeline_instead_of_uploaded_frames() -> None:
     assert "first_frame" not in values
 
 
+def test_storyboard_without_a_preamble_keeps_timecodes_out_of_global_prompt() -> None:
+    config = project_config()
+    values = build_values(
+        request(mode="story", prompt="[0s-5s] 山谷\n[5s-10s] 树冠"),
+        config=config,
+        uploaded={},
+    )
+
+    timeline = json.loads(values["timeline"])
+    assert values["prompt"] == ""
+    assert [segment["prompt"] for segment in timeline["segments"]] == ["山谷", "树冠"]
+
+
+def test_storyboard_preamble_is_the_only_global_prompt() -> None:
+    config = project_config()
+    values = build_values(
+        request(mode="story", prompt="胶片质感\n[0s-5s] 山谷\n[5s-10s] 树冠"),
+        config=config,
+        uploaded={},
+    )
+
+    assert values["prompt"] == "胶片质感"
+
+
 def test_progress_tracker_reports_one_monotonic_bar_across_shots() -> None:
     tracker = ProgressTracker(passes=2)
-    values = [
-        tracker.update(ProgressEvent(node="5", value=step, maximum=10)).percent
+    reports = [
+        tracker.update(ProgressEvent(node="5", value=step, maximum=10))
         for step in (1, 10, 1, 10)
     ]
 
-    assert values == sorted(values)
-    assert values[-1] == pytest.approx(0.99)
+    assert [report.percent for report in reports] == pytest.approx(
+        [0.05, 0.5, 0.55, 0.99]
+    )
+    assert [report.pass_index for report in reports] == [1, 1, 2, 2]
+
+
+def test_progress_tracker_counts_a_pass_when_the_sampler_node_changes() -> None:
+    tracker = ProgressTracker(passes=2)
+    reports = [
+        tracker.update(ProgressEvent(node=node, value=step, maximum=10))
+        for node, step in (("5", 1), ("5", 10), ("6", 1), ("6", 10))
+    ]
+
+    assert [report.percent for report in reports] == pytest.approx(
+        [0.05, 0.5, 0.55, 0.99]
+    )
+    assert [report.pass_index for report in reports] == [1, 1, 2, 2]
+
+
+def test_progress_tracker_grows_the_denominator_past_the_expected_passes() -> None:
+    tracker = ProgressTracker(passes=1)
+    reports = [
+        tracker.update(ProgressEvent(node=node, value=10, maximum=10))
+        for node in ("5", "6", "7")
+    ]
+
+    assert [report.pass_total for report in reports] == [1, 2, 3]
+    assert [report.percent for report in reports] == pytest.approx([0.99, 0.99, 0.99])
+
+
+@pytest.mark.parametrize(
+    ("mode", "first", "last", "message"),
+    [
+        ("t2v", True, False, "不接首帧"),
+        ("t2v", False, True, "不接尾帧"),
+        ("i2v", True, True, "不接尾帧"),
+    ],
+)
+def test_modes_refuse_reference_frames_they_cannot_patch(
+    mode: str, first: bool, last: bool, message: str
+) -> None:
+    config = project_config()
+
+    with pytest.raises(RenderError, match=message):
+        validate_render(
+            request(mode=mode),
+            config=config,
+            has_first_frame=first,
+            has_last_frame=last,
+        )
+
+
+def test_frame_modes_still_accept_the_frames_they_declare() -> None:
+    config = project_config()
+
+    assert validate_render(
+        request(mode="i2v"), config=config, has_first_frame=True, has_last_frame=False
+    ).seconds == pytest.approx(5.0)
+    assert validate_render(
+        request(mode="flf2v"), config=config, has_first_frame=True, has_last_frame=True
+    ).seconds == pytest.approx(5.0)
 
 
 def test_shipped_workflows_satisfy_every_configured_pointer() -> None:

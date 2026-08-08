@@ -69,7 +69,12 @@ class ProgressTracker:
         self._peak = 0.0
 
     def update(self, event: ProgressEvent) -> RenderProgress:
-        if self._node == event.node and event.value < self._value:
+        # A pass ends either when the same node restarts its step budget or when
+        # a different node takes over; a story graph may run each shot on its own
+        # sampler, and treating that as "still the first pass" freezes the bar.
+        if self._node is not None and (
+            self._node != event.node or event.value < self._value
+        ):
             self._done += 1
         self._node = event.node
         self._value = event.value
@@ -182,6 +187,13 @@ def validate_render(
             raise RenderError(f"{request.mode} 需要一张首帧图片")
         if "last_frame" in mode_settings.inputs and not has_last_frame:
             raise RenderError("首尾帧模式需要尾帧图片")
+        # A mode without a pointer for a slot has nowhere to patch that image, so
+        # accepting one here would only surface as a workflow error mid-render,
+        # after the file had already been handed to ComfyUI.
+        if has_first_frame and "first_frame" not in mode_settings.inputs:
+            raise RenderError(f"{request.mode} 不接首帧图片,请换用图生视频或首尾帧")
+        if has_last_frame and "last_frame" not in mode_settings.inputs:
+            raise RenderError(f"{request.mode} 不接尾帧图片,请换用首尾帧模式")
         seconds = request.seconds
     return RenderValidation(
         mode=request.mode, timeline_mode=timeline_mode, seconds=seconds
@@ -273,7 +285,10 @@ def build_values(
     if mode_settings is not None and is_timeline_mode(mode_settings):
         board = parse_storyboard(request.prompt, default_seconds=request.seconds)
         timeline = build_timeline(board, config=config, width=width, height=height)
-        values["prompt"] = board.preamble or request.prompt
+        # Only the preamble is global. Without one the shot text already lives in
+        # the segments, and falling back to the raw request would hand the
+        # director node the bracketed timecodes the storyboard was parsed from.
+        values["prompt"] = board.preamble
         values["length"] = timeline["totalFrames"]
         values[TIMELINE_INPUT] = json.dumps(timeline, ensure_ascii=False)
         return values
