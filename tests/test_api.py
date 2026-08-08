@@ -216,6 +216,44 @@ def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
     assert "首帧" in response.json()["detail"]
 
 
+def test_text_mode_refuses_a_reference_frame_it_cannot_patch(tmp_path: Path) -> None:
+    renderer = FakeRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        validated = client.post(
+            "/v1/validate",
+            json={
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": 864,
+                "height": 480,
+                "seconds": 5,
+                "has_first_frame": True,
+                "has_last_frame": False,
+            },
+        )
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_stray_frame",
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+            files={"first_frame": ("first.png", b"PNG", "image/png")},
+        )
+        missing = client.get("/v1/renders/vg_stray_frame")
+
+    assert validated.status_code == 400
+    assert "不接首帧" in validated.json()["detail"]
+    # The frame must be refused at the seam, not accepted and then failed after
+    # the renderer has already uploaded it to ComfyUI.
+    assert submitted.status_code == 400
+    assert missing.status_code == 404
+    assert renderer.requests == []
+
+
 def test_unknown_mode_is_a_client_error_not_a_worker_crash(tmp_path: Path) -> None:
     with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
         response = client.post(
