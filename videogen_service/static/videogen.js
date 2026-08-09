@@ -34,6 +34,10 @@ const projectNewButton = document.getElementById("project-new");
 const projectDrafts = document.getElementById("project-drafts");
 const draftList = document.getElementById("draft-list");
 const sourceSkill = document.getElementById("source-skill");
+const pipelinePanel = document.getElementById("pipeline-panel");
+const pipelineStatus = document.getElementById("pipeline-status");
+const pipelineNotice = document.getElementById("pipeline-notice");
+const pipelineActions = document.getElementById("pipeline-actions");
 
 const sourceBlock = document.getElementById("source-block");
 const sourceUrl = document.getElementById("source-url");
@@ -708,7 +712,9 @@ async function createProject() {
       body: JSON.stringify({ name: name.trim() }),
     });
     await loadProjects(project.project_id);
+    pipelineFilledDraft = null;
     await refreshDrafts();
+    await refreshPipeline();
     if (window.AppUI) AppUI.showToast("项目已创建", "success");
   } catch (error) {
     notify(composeNotice, error.message, "error");
@@ -729,6 +735,199 @@ async function linkRenderToProject(renderId) {
   } catch (error) {
     notify(composeNotice, `已排队，但归档到项目失败：${error.message}`, "error");
   }
+}
+
+// ---- 自动流水线 --------------------------------------------------------------
+// 起稿到渲染的编排全在本机:yt-dlp 取字幕、Ollama 出脚本、人工审阅是硬关卡、
+// 批准后进 ComfyUI 渲染队列。脚本好了流水线会停在 AWAITING_REVIEW 等人。
+
+const PIPELINE_LABELS = {
+  QUEUED: "排队等脚本…",
+  SCRIPTING: "正在取字幕并让 Ollama 总结，通常要一两分钟…",
+  AWAITING_REVIEW: "脚本草稿已就绪并填进了表单——改到满意后点「批准并渲染」。",
+  RENDERING: "已批准，渲染中；进度看右侧任务列表。",
+  DONE: "流水线完成，视频在右侧任务列表里。",
+  REJECTED: "草稿已驳回。清除后可以换个要求重新起稿。",
+  FAILED: "流水线失败。",
+};
+
+let pipelineTimer = null;
+// 记住已回填过的草稿,轮询时不反复覆盖审阅人正在改的提示词。
+let pipelineFilledDraft = null;
+
+function stopPipelinePoll() {
+  if (pipelineTimer !== null) {
+    clearInterval(pipelineTimer);
+    pipelineTimer = null;
+  }
+}
+
+function schedulePipelinePoll(run) {
+  const active =
+    run && ["QUEUED", "SCRIPTING", "RENDERING"].includes(run.status);
+  if (!active) {
+    stopPipelinePoll();
+    return;
+  }
+  if (pipelineTimer === null) {
+    pipelineTimer = setInterval(refreshPipeline, 3000);
+  }
+}
+
+function pipelineButton(label, kind, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `button ${kind}`;
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+async function pipelineCall(path, options, after) {
+  try {
+    await request(path, options);
+    notify(pipelineNotice, "", "");
+    if (after) await after();
+    await refreshPipeline();
+  } catch (error) {
+    notify(pipelineNotice, error.message, "error");
+  }
+}
+
+async function startPipeline() {
+  const projectId = projectSelect.value;
+  const url = sourceUrl.value.trim();
+  if (!url) {
+    notify(pipelineNotice, "先在上面的「从 YouTube 网址起稿」里贴链接", "error");
+    return;
+  }
+  await pipelineCall(`/v1/projects/${projectId}/pipeline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      target_seconds: Number(sourceTarget.value) || null,
+      max_shots: Number(sourceMaxShots.value) || null,
+      guidance: sourceGuidance.value.trim() || null,
+      skill: sourceSkill.value || null,
+      width: Number(document.getElementById("width").value) || 864,
+      height: Number(document.getElementById("height").value) || 480,
+    }),
+  });
+}
+
+async function approvePipeline(run) {
+  const body = {};
+  const edited = promptInput.value.trim();
+  // 审阅人在主表单里改分镜;和草稿不一样才算改过,原样批准就渲染存档稿。
+  if (run.draft && edited && edited !== run.draft.result.prompt) {
+    body.prompt = edited;
+  }
+  await pipelineCall(
+    `/v1/projects/${projectSelect.value}/pipeline/approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    async () => {
+      await loadProjects(projectSelect.value);
+      await refreshJobs();
+    },
+  );
+}
+
+async function rejectPipeline() {
+  const reason = window.prompt("驳回原因（可留空）：") ?? "";
+  await pipelineCall(`/v1/projects/${projectSelect.value}/pipeline/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason.trim() || null }),
+  });
+}
+
+function renderPipeline(run) {
+  pipelineActions.replaceChildren();
+  if (!run) {
+    pipelineStatus.textContent =
+      "没有进行中的流水线。贴好链接后一键起稿：脚本生成后会停下等你审阅，批准才进显卡。";
+    pipelineActions.append(
+      pipelineButton("一键起稿 → 审阅 → 渲染", "button-primary", startPipeline),
+    );
+    stopPipelinePoll();
+    return;
+  }
+  let text = PIPELINE_LABELS[run.status] || run.status;
+  if (run.status === "FAILED" && run.error) text += `原因：${run.error}`;
+  if (run.status === "REJECTED" && run.review && run.review.reason) {
+    text += `原因：${run.review.reason}`;
+  }
+  pipelineStatus.textContent = text;
+
+  const projectId = projectSelect.value;
+  if (run.status === "AWAITING_REVIEW") {
+    if (run.draft && pipelineFilledDraft !== run.draft.draft_id) {
+      fillFromScript(run.draft.result);
+      pipelineFilledDraft = run.draft.draft_id;
+    }
+    pipelineActions.append(
+      pipelineButton("批准并渲染", "button-primary", () => approvePipeline(run)),
+      pipelineButton("驳回", "button-danger", rejectPipeline),
+    );
+  } else if (run.status === "FAILED") {
+    pipelineActions.append(
+      pipelineButton("重试", "button-primary", () =>
+        pipelineCall(`/v1/projects/${projectId}/pipeline/retry`, {
+          method: "POST",
+        }),
+      ),
+      pipelineButton("清除", "button-secondary", () =>
+        pipelineCall(`/v1/projects/${projectId}/pipeline`, {
+          method: "DELETE",
+        }),
+      ),
+    );
+  } else if (run.status === "DONE" || run.status === "REJECTED") {
+    pipelineActions.append(
+      pipelineButton("清除，准备下一条", "button-secondary", () =>
+        pipelineCall(`/v1/projects/${projectId}/pipeline`, {
+          method: "DELETE",
+        }),
+      ),
+    );
+  } else if (run.status === "QUEUED" || run.status === "SCRIPTING") {
+    pipelineActions.append(
+      pipelineButton("取消", "button-secondary", () =>
+        pipelineCall(`/v1/projects/${projectId}/pipeline`, {
+          method: "DELETE",
+        }),
+      ),
+    );
+  }
+  schedulePipelinePoll(run);
+}
+
+async function refreshPipeline() {
+  const projectId = projectSelect.value;
+  if (!projectId) {
+    pipelinePanel.hidden = true;
+    stopPipelinePoll();
+    return;
+  }
+  pipelinePanel.hidden = false;
+  let run = null;
+  try {
+    run = await request(`/v1/projects/${projectId}/pipeline`);
+  } catch (error) {
+    // 404 就是还没起过流水线;别的错误也先按"没有"展示,下一轮再试。
+  }
+  const wasRendering = run && run.status === "RENDERING";
+  renderPipeline(run);
+  if (run && run.status === "DONE") {
+    await loadProjects(projectId);
+    await refreshDrafts();
+  }
+  if (wasRendering) await refreshJobs();
 }
 
 // ---- YouTube 网址 → 分镜脚本 ------------------------------------------------
@@ -828,7 +1027,12 @@ form.addEventListener("submit", async (event) => {
 
 sourceButton.addEventListener("click", createScript);
 projectNewButton.addEventListener("click", createProject);
-projectSelect.addEventListener("change", refreshDrafts);
+projectSelect.addEventListener("change", async () => {
+  pipelineFilledDraft = null;
+  notify(pipelineNotice, "", "");
+  await refreshDrafts();
+  await refreshPipeline();
+});
 sourceUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -927,6 +1131,7 @@ async function start() {
   refreshLengthHint();
   syncRatioButtons();
   await Promise.all([loadSkills(), loadProjects()]);
+  await refreshPipeline();
   // refreshJobs starts its own timer, and only while a job is in flight.
   await refreshJobs();
 }

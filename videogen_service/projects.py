@@ -20,6 +20,7 @@ from videogen_service.models import ScriptRequest, ScriptResult
 # Same shape as render ids. The store itself lives under ".projects", which can
 # never collide with a render directory because a dot is not a legal id char.
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+PROJECTS_DIRNAME = ".projects"
 
 
 class ProjectError(RuntimeError):
@@ -69,7 +70,7 @@ class ProjectSummary(StrictModel):
 
 class ProjectStore:
     def __init__(self, work_dir: Path) -> None:
-        self._directory = work_dir / ".projects"
+        self._directory = work_dir / PROJECTS_DIRNAME
         self._lock = Lock()
 
     def create(self, *, project_id: str | None, name: str) -> ProjectRecord:

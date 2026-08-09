@@ -20,6 +20,15 @@ from videogen_service.models import (
     ScriptRequest,
     ScriptResult,
 )
+from videogen_service.pipeline import (
+    PipelineApproveRequest,
+    PipelineConflict,
+    PipelineNotFound,
+    PipelineRejectRequest,
+    PipelineRequest,
+    PipelineService,
+    PipelineView,
+)
 from videogen_service.projects import (
     ProjectConflict,
     ProjectError,
@@ -60,18 +69,22 @@ def create_app(
 ) -> FastAPI:
     settings = config or load_config()
     skills = SkillLibrary(settings.skills_dir)
+    workshop = studio or ScriptStudio(settings, skills=skills)
     service = RenderService(
-        settings,
-        renderer or H3Renderer(settings),
-        studio=studio or ScriptStudio(settings, skills=skills),
+        settings, renderer or H3Renderer(settings), studio=workshop
     )
     projects = ProjectStore(settings.work_dir)
+    pipeline = PipelineService(
+        settings, renders=service, projects=projects, studio=workshop
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            # The pipeline submits renders, so it stops taking work first.
+            pipeline.close()
             service.close()
 
     app = FastAPI(title="VideoTube Videogen", version="0.1.0", lifespan=lifespan)
@@ -196,6 +209,80 @@ def create_app(
             return projects.link_render(project_id, request.render_id)
         except (ProjectNotFound, RenderNotFound) as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post(
+        "/v1/projects/{project_id}/pipeline",
+        response_model=PipelineView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_pipeline(project_id: str, request: PipelineRequest) -> PipelineView:
+        try:
+            return pipeline.start(project_id, request)
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except PipelineConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/v1/projects/{project_id}/pipeline", response_model=PipelineView)
+    def get_pipeline(project_id: str) -> PipelineView:
+        try:
+            return pipeline.get(project_id)
+        except PipelineNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post(
+        "/v1/projects/{project_id}/pipeline/approve",
+        response_model=PipelineView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def approve_pipeline(
+        project_id: str, request: PipelineApproveRequest
+    ) -> PipelineView:
+        try:
+            return pipeline.approve(project_id, prompt=request.prompt)
+        except PipelineNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (PipelineConflict, RenderConflict) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RenderError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post(
+        "/v1/projects/{project_id}/pipeline/reject", response_model=PipelineView
+    )
+    def reject_pipeline(
+        project_id: str, request: PipelineRejectRequest
+    ) -> PipelineView:
+        try:
+            return pipeline.reject(project_id, reason=request.reason)
+        except PipelineNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except PipelineConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/v1/projects/{project_id}/pipeline/retry",
+        response_model=PipelineView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def retry_pipeline(project_id: str) -> PipelineView:
+        try:
+            return pipeline.retry(project_id)
+        except (PipelineNotFound, RenderNotFound) as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (PipelineConflict, RenderConflict) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.delete(
+        "/v1/projects/{project_id}/pipeline",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_pipeline(project_id: str) -> Response:
+        try:
+            pipeline.delete(project_id)
+        except PipelineNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
         "/v1/renders",

@@ -94,6 +94,7 @@ Copy-Item config.example.yaml config.yaml
 - `POST /v1/scripts`：传一个 YouTube 网址，取字幕、让 Ollama 总结成分镜脚本。可选 `skill` 套用一份具名创作规范，可选 `project_id` 把结果自动存成项目草稿。
 - `GET /v1/skills`：列出 `skills/` 里的创作预设。
 - `GET/POST /v1/projects`、`GET/DELETE /v1/projects/{id}`、`POST /v1/projects/{id}/renders`：项目工作区——脚本草稿和渲染的归档容器，见下文。
+- `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
@@ -125,6 +126,19 @@ curl -s http://127.0.0.1:8020/v1/scripts \
 这一步只花 CPU 和 Ollama，不碰 GPU；要不要渲染、渲染几次仍然由原项目决定。取不到字幕、Ollama 没启动这类上游问题返回 `503`，链接不是 YouTube、模型没给出分镜这类返回 `400`。需要登录态或代理才能取字幕时，填 `script.cookies_file` 和 `script.proxy`。
 
 服务一次只让一个任务进入 GPU。状态以版本明确的 JSON 落在 `work/<render_id>/`；进程重启后，未完成任务会转为可重试的失败态，不会伪装成仍在运行。
+
+## 自动流水线
+
+选中项目后，生成台的"自动流水线"面板可以一键跑完起稿到渲染，编排的全是本机组件，不依赖任何云端 API：
+
+```text
+QUEUED → SCRIPTING（yt-dlp 取字幕 + Ollama 出脚本,自动存为项目草稿）
+       → AWAITING_REVIEW（硬关卡:草稿填进表单,等人批准或驳回）
+       → RENDERING（批准后进 ComfyUI 渲染队列,渲染挂进项目）
+       → DONE / REJECTED / FAILED（失败可重试:脚本阶段重跑,渲染阶段重排原渲染）
+```
+
+审阅是刻意保留的人工关卡：流水线只有提案权，批准才花显卡——和 `docs/visual-director-contract-v1.md` 的权力分离一致。批准前可以直接在提示词框里改分镜，改过的版本进渲染，存档草稿保持原样并记下 `prompt_overridden`。状态落在 `work/.projects/<id>/pipeline.json`，每个项目同时只有一条；服务重启后，脚本阶段被打断的流水线转成可重试的失败态，渲染阶段的靠渲染队列自己的恢复结果收敛。
 
 ## 项目与 Skill
 

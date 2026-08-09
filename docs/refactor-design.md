@@ -20,6 +20,9 @@ Agent 编排、Skill 技能库、Memory 记忆、本地工作流打通。本文�
 
 ## 2. 不变的约束
 
+0. **一切在本机完成，不依赖云端 API。** 生产链路只有三个本地组件：yt-dlp
+   （字幕）、Ollama（文本）、ComfyUI/H3（画面）。后续所有阶段——编排、资产、
+   Memory、导入导出——都只编排这三样和本地文件，不引入任何云服务调用。
 1. **`/health`、`/v1/validate`、`/v1/renders` 系列是冻结契约。** `videotube` 用
    `extra="forbid"` 解析这些响应，字段一个都不能加。所有新能力走新路由，响应模型
    （`RenderView`、health 字典）保持原样。
@@ -56,12 +59,16 @@ Agent 编排、Skill 技能库、Memory 记忆、本地工作流打通。本文�
   SKILL.md；带 project_id 就把生成结果自动存成该项目的一版草稿。
 - 生成台页面：项目选择/新建、Skill 下拉、草稿列表回填、提交渲染自动挂进项目。
 
-### 阶段二：Agent 编排
+### 阶段二（已实现）：Agent 编排
 
 流水线运行器把项目推着走：取字幕 → 出脚本 →（人工审阅关卡）→ 提交渲染 →
-收产物。阶段状态机与 render 同风格落盘、重启可恢复。编排内核逐步引入
-visual-director 契约的 Director Brief / Visual Proposal / 裁决对象；
-`legacy_rules_v1` 的确定性 Proposal Builder 先行，模型排序走 shadow 期。
+收产物。`videogen_service/pipeline.py`：QUEUED → SCRIPTING → AWAITING_REVIEW
+→ RENDERING → DONE/REJECTED/FAILED，落盘 `work/.projects/<id>/pipeline.json`，
+每项目一条活动流水线；脚本阶段在工作线程执行，渲染阶段委托渲染队列并在读取时
+懒同步终态，重启恢复与渲染记录同风格。审阅批准可携带改过的分镜（记
+`prompt_overridden`），驳回记原因。visual-director 契约的 Director Brief /
+Visual Proposal / 裁决对象是后续增强：确定性 Proposal Builder 先行，模型排序
+走 shadow 期。
 
 ### 阶段三：资产中心
 
