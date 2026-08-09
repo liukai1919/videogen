@@ -136,12 +136,15 @@ function refreshModeFields() {
   if (mode === "t2v" || storyboard) {
     document.getElementById("first-frame").value = "";
     document.getElementById("last-frame").value = "";
+    assetSelects.first.value = "";
+    assetSelects.last.value = "";
     revokeFrameUrl("first");
     revokeFrameUrl("last");
     document.getElementById("first-frame-preview").hidden = true;
     document.getElementById("last-frame-preview").hidden = true;
   } else if (mode === "i2v") {
     document.getElementById("last-frame").value = "";
+    assetSelects.last.value = "";
     revokeFrameUrl("last");
     document.getElementById("last-frame-preview").hidden = true;
   }
@@ -323,7 +326,23 @@ function renderJob(job) {
       more.classList.remove("is-open");
       deleteJob(job, card);
     });
-    panel.append(reuse, remove);
+    panel.append(reuse);
+    for (const [flag, slot, label] of [
+      [job.has_first_frame, "first", "首帧存为资产"],
+      [job.has_last_frame, "last", "尾帧存为资产"],
+    ]) {
+      if (!flag) continue;
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "menu-item";
+      save.textContent = label;
+      save.addEventListener("click", () => {
+        more.classList.remove("is-open");
+        saveFrameAsset(job, slot);
+      });
+      panel.append(save);
+    }
+    panel.append(remove);
     more.append(toggle, panel);
     top.append(more);
   }
@@ -616,6 +635,150 @@ function syncRatioButtons() {
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+}
+
+// ---- 资产中心 ----------------------------------------------------------------
+// 具名的可复用参考图,住在 work/.assets/。提交渲染时服务端把资产字节拷进渲染
+// 目录,所以之后删资产不影响任何历史任务。
+
+const assetSelects = {
+  first: document.getElementById("first-frame-asset"),
+  last: document.getElementById("last-frame-asset"),
+};
+const assetList = document.getElementById("asset-list");
+const assetNotice = document.getElementById("asset-notice");
+
+let assetIndex = new Map();
+
+function assetLabel(asset) {
+  return asset.category ? `${asset.name}（${asset.category}）` : asset.name;
+}
+
+function renderAssetOptions(select, assets) {
+  const keep = select.value;
+  while (select.options.length > 1) select.remove(1);
+  for (const asset of assets) {
+    const option = document.createElement("option");
+    option.value = asset.asset_id;
+    option.textContent = assetLabel(asset);
+    select.append(option);
+  }
+  if (keep && [...select.options].some((o) => o.value === keep)) {
+    select.value = keep;
+  }
+}
+
+function renderAssetRows(assets) {
+  assetList.replaceChildren();
+  for (const asset of assets) {
+    const item = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "asset-row";
+    const thumb = document.createElement("img");
+    thumb.className = "asset-thumb";
+    thumb.src = asset.media_url;
+    thumb.alt = asset.name;
+    thumb.loading = "lazy";
+    const label = document.createElement("span");
+    label.textContent = assetLabel(asset);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button button-ghost asset-delete";
+    remove.textContent = "删除";
+    remove.addEventListener("click", async () => {
+      const ok = await confirmDelete(
+        `删除资产「${asset.name}」？已提交的渲染不受影响。`,
+      );
+      if (!ok) return;
+      try {
+        await request(`/v1/assets/${asset.asset_id}`, { method: "DELETE" });
+        await loadAssets();
+      } catch (error) {
+        notify(assetNotice, error.message, "error");
+      }
+    });
+    row.append(thumb, label, remove);
+    item.append(row);
+    assetList.append(item);
+  }
+}
+
+async function loadAssets() {
+  let assets;
+  try {
+    assets = await request("/v1/assets");
+  } catch (error) {
+    return; // 资产列表挂了不拦渲染,下拉里没得选而已。
+  }
+  assetIndex = new Map(assets.map((asset) => [asset.asset_id, asset]));
+  renderAssetOptions(assetSelects.first, assets);
+  renderAssetOptions(assetSelects.last, assets);
+  renderAssetRows(assets);
+}
+
+// 选中资产且没有另传文件时,预览直接指向资产图。
+function showAssetPreview(key) {
+  const select = assetSelects[key];
+  const input = document.getElementById(key === "first" ? "first-frame" : "last-frame");
+  const preview = document.getElementById(`${key}-frame-preview`);
+  const img = document.getElementById(`${key}-frame-img`);
+  const name = document.getElementById(`${key}-frame-name`);
+  if (input.files && input.files[0]) return; // 上传文件优先,预览保持文件的
+  const asset = assetIndex.get(select.value);
+  if (!asset) {
+    preview.hidden = true;
+    img.removeAttribute("src");
+    name.textContent = "";
+    return;
+  }
+  img.src = asset.media_url;
+  name.textContent = `资产：${asset.name}`;
+  preview.hidden = false;
+}
+
+async function uploadAsset() {
+  const name = document.getElementById("asset-name").value.trim();
+  const file = document.getElementById("asset-file").files[0];
+  if (!name || !file) {
+    notify(assetNotice, "名称和图片都要填", "error");
+    return;
+  }
+  const body = new FormData();
+  body.set("name", name);
+  body.set("category", document.getElementById("asset-category").value.trim());
+  body.set("file", file);
+  try {
+    await request("/v1/assets", { method: "POST", body });
+    document.getElementById("asset-name").value = "";
+    document.getElementById("asset-file").value = "";
+    notify(assetNotice, "已存入资产中心", "ok");
+    await loadAssets();
+  } catch (error) {
+    notify(assetNotice, error.message, "error");
+  }
+}
+
+async function saveFrameAsset(job, slot) {
+  const name = window.prompt(
+    "资产名称：",
+    `${modeLabel(job.mode)}参考图 ${job.render_id.slice(-6)}`,
+  );
+  if (!name || !name.trim()) return;
+  try {
+    await request("/v1/assets/from-render", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        render_id: job.render_id,
+        slot,
+        name: name.trim(),
+      }),
+    });
+    if (window.AppUI) AppUI.showToast("参考帧已存入资产中心", "success");
+    await loadAssets();
+  } catch (error) {
+    notify(composeNotice, error.message, "error");
+  }
 }
 
 // ---- 项目与 Skill -----------------------------------------------------------
@@ -1014,6 +1177,17 @@ form.addEventListener("submit", async (event) => {
       const file = body.get(key);
       if (file && file.size === 0 && !file.name) body.delete(key);
     }
+    // 隐藏或空着的资产选择不跟着提交:模式不吃参考图时残留的选中项会被
+    // 服务端当成真参考图拒掉。
+    for (const key of ["first_frame_asset", "last_frame_asset"]) {
+      if (!String(body.get(key) || "").trim()) body.delete(key);
+    }
+    if (frameFields.hidden) {
+      body.delete("first_frame_asset");
+      body.delete("last_frame_asset");
+    } else if (lastFrameField.hidden) {
+      body.delete("last_frame_asset");
+    }
     await request("/v1/renders", { method: "POST", body });
     notify(composeNotice, "已排队，生成期间显卡会被独占", "ok");
     await linkRenderToProject(renderId);
@@ -1026,6 +1200,9 @@ form.addEventListener("submit", async (event) => {
 });
 
 sourceButton.addEventListener("click", createScript);
+document.getElementById("asset-upload").addEventListener("click", uploadAsset);
+assetSelects.first.addEventListener("change", () => showAssetPreview("first"));
+assetSelects.last.addEventListener("change", () => showAssetPreview("last"));
 projectNewButton.addEventListener("click", createProject);
 projectSelect.addEventListener("change", async () => {
   pipelineFilledDraft = null;
@@ -1130,7 +1307,7 @@ async function start() {
   refreshModeFields();
   refreshLengthHint();
   syncRatioButtons();
-  await Promise.all([loadSkills(), loadProjects()]);
+  await Promise.all([loadSkills(), loadProjects(), loadAssets()]);
   await refreshPipeline();
   // refreshJobs starts its own timer, and only while a job is in flight.
   await refreshJobs();

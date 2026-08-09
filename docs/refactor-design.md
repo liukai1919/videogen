@@ -70,10 +70,14 @@ Agent 编排、Skill 技能库、Memory 记忆、本地工作流打通。本文�
 Visual Proposal / 裁决对象是后续增强：确定性 Proposal Builder 先行，模型排序
 走 shadow 期。
 
-### 阶段三：资产中心
+### 阶段三（已实现）：资产中心
 
-参考帧、角色/场景/风格包成为一等公民：`work/assets/<asset_id>/`，具名、分类、
-跨项目引用；render 的参考帧可以"存为资产"，新任务从资产选图而不是每次上传。
+参考帧、角色/场景/风格包成为一等公民：`videogen_service/assets.py`，
+`work/.assets/<asset_id>/{asset.json,media.*}`，具名、分类、跨项目引用。
+render 的参考帧可以"存为资产"（`POST /v1/assets/from-render`），新任务从资产
+选图而不是每次上传（`/v1/renders` 的可选 `first_frame_asset`/`last_frame_asset`
+表单字段，上传文件优先）。提交时资产字节拷进渲染目录，渲染自包含，删资产
+不碰历史。
 
 ### 阶段四：Memory
 

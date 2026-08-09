@@ -95,6 +95,8 @@ Copy-Item config.example.yaml config.yaml
 - `GET /v1/skills`：列出 `skills/` 里的创作预设。
 - `GET/POST /v1/projects`、`GET/DELETE /v1/projects/{id}`、`POST /v1/projects/{id}/renders`：项目工作区——脚本草稿和渲染的归档容器，见下文。
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
+- `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
+- `POST /v1/renders` 新增可选表单字段 `first_frame_asset`/`last_frame_asset`：用资产代替上传参考图；`videotube` 不发这两个字段，冻结契约不受影响，上传文件优先于资产。
 - `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
@@ -139,6 +141,10 @@ QUEUED → SCRIPTING（yt-dlp 取字幕 + Ollama 出脚本,自动存为项目草
 ```
 
 审阅是刻意保留的人工关卡：流水线只有提案权，批准才花显卡——和 `docs/visual-director-contract-v1.md` 的权力分离一致。批准前可以直接在提示词框里改分镜，改过的版本进渲染，存档草稿保持原样并记下 `prompt_overridden`。状态落在 `work/.projects/<id>/pipeline.json`，每个项目同时只有一条；服务重启后，脚本阶段被打断的流水线转成可重试的失败态，渲染阶段的靠渲染队列自己的恢复结果收敛。
+
+## 资产中心
+
+参考图从一次性的上传变成有身份的素材：`work/.assets/<asset_id>/` 存一张图和它的名字、分类（角色、场景、风格包、道具……）。生成台的首尾帧字段可以直接从资产下拉里选；任务卡的「⋯」菜单能把当初提交的参考帧存为资产。提交渲染时服务端把资产字节拷进渲染目录——渲染保持自包含，之后删资产不影响任何历史任务。
 
 ## 项目与 Skill
 

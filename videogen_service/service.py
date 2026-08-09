@@ -232,6 +232,21 @@ class RenderService:
             self._queue.put(request)
         return self.get(render_id)
 
+    def frame_path(self, render_id: str, slot: str) -> Path:
+        """Where a submitted render's reference frame lives, for archival
+        into the asset center."""
+        with self._state_lock:
+            if self._load_record(render_id) is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            request = self._read_request(self._render_dir(render_id))
+            if request is None:
+                raise RenderNotFound(f"render {render_id} 的请求已经不在了")
+            path = request.first_frame if slot == "first" else request.last_frame
+            if path is None or not path.is_file():
+                slot_name = "首帧" if slot == "first" else "尾帧"
+                raise RenderNotFound(f"render {render_id} 没有{slot_name}参考图")
+            return path
+
     def media_path(self, render_id: str) -> Path:
         with self._state_lock:
             record = self._load_record(render_id)

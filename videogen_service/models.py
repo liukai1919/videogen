@@ -148,6 +148,15 @@ class ProjectRenderLink(StrictModel):
     render_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
+class AssetFromRenderRequest(StrictModel):
+    """Archive a submitted render's reference frame as a reusable asset."""
+
+    render_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    slot: Literal["first", "last"]
+    name: str = Field(min_length=1, max_length=120)
+    category: str = Field(default="参考帧", max_length=40)
+
+
 class RenderView(StrictModel):
     render_id: str
     status: RenderStatus

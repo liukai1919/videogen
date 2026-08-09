@@ -139,6 +139,9 @@
                   <label class="field">
                     <span class="field-label">首帧图片</span>
                     <input type="file" name="first_frame" id="first-frame" accept="image/*">
+                    <select name="first_frame_asset" id="first-frame-asset" class="field-input">
+                      <option value="">或从资产中心选参考图</option>
+                    </select>
                     <div class="frame-preview" id="first-frame-preview" hidden>
                       <img alt="首帧预览" id="first-frame-img">
                       <span class="frame-name" id="first-frame-name"></span>
@@ -147,6 +150,9 @@
                   <label class="field" id="last-frame-field" hidden>
                     <span class="field-label">尾帧图片</span>
                     <input type="file" name="last_frame" id="last-frame" accept="image/*">
+                    <select name="last_frame_asset" id="last-frame-asset" class="field-input">
+                      <option value="">或从资产中心选参考图</option>
+                    </select>
                     <div class="frame-preview" id="last-frame-preview" hidden>
                       <img alt="尾帧预览" id="last-frame-img">
                       <span class="frame-name" id="last-frame-name"></span>
@@ -193,6 +199,33 @@
                 <div id="compose-notice" role="status"></div>
                 <button type="submit" id="generate-button" class="button button-primary button-block">开始生成</button>
               </form>
+
+              <details class="advanced-block" id="asset-block">
+                <summary>资产中心</summary>
+                <div class="advanced-body">
+                  <p class="hint">
+                    沉淀可复用的参考图（角色、场景、风格包、道具），渲染时从上面的下拉直接选用，
+                    不用每次重新上传。任务卡的「⋯」菜单也能把参考帧存进来。
+                  </p>
+                  <div class="form-grid">
+                    <label class="field">
+                      <span class="field-label">名称</span>
+                      <input type="text" id="asset-name" class="field-input" placeholder="例如：主角小熊">
+                    </label>
+                    <label class="field">
+                      <span class="field-label">分类（可留空）</span>
+                      <input type="text" id="asset-category" class="field-input" placeholder="角色 / 场景 / 风格包 / 道具">
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">图片</span>
+                    <input type="file" id="asset-file" accept="image/*">
+                  </label>
+                  <div id="asset-notice" role="status"></div>
+                  <button type="button" id="asset-upload" class="button button-secondary button-block">上传为资产</button>
+                  <ul class="asset-list" id="asset-list"></ul>
+                </div>
+              </details>
             </section>
 
             <section class="card vg-gallery-card">

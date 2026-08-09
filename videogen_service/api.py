@@ -8,8 +8,17 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import ValidationError
 from urllib.parse import urlparse
 
+from videogen_service.assets import (
+    MEDIA_TYPES,
+    AssetError,
+    AssetNotFound,
+    AssetStore,
+    AssetView,
+    asset_view,
+)
 from videogen_service.config import ServiceConfig, load_config
 from videogen_service.models import (
+    AssetFromRenderRequest,
     ProjectCreateRequest,
     ProjectRenderLink,
     RenderSpec,
@@ -74,6 +83,7 @@ def create_app(
         settings, renderer or H3Renderer(settings), studio=workshop
     )
     projects = ProjectStore(settings.work_dir)
+    assets = AssetStore(settings.work_dir)
     pipeline = PipelineService(
         settings, renders=service, projects=projects, studio=workshop
     )
@@ -210,6 +220,76 @@ def create_app(
         except (ProjectNotFound, RenderNotFound) as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
+    @app.get("/v1/assets", response_model=list[AssetView])
+    def list_assets() -> list[AssetView]:
+        return [asset_view(record) for record in assets.list()]
+
+    @app.post(
+        "/v1/assets", response_model=AssetView, status_code=status.HTTP_201_CREATED
+    )
+    async def create_asset(
+        name: str = Form(..., min_length=1, max_length=120),
+        category: str = Form("", max_length=40),
+        file: UploadFile = File(...),
+    ) -> AssetView:
+        upload = await _read_upload(file)
+        if upload is None:
+            raise HTTPException(status_code=400, detail="资产需要一张图片")
+        filename, data = upload
+        try:
+            return asset_view(
+                assets.create(
+                    name=name, category=category, filename=filename, data=data
+                )
+            )
+        except AssetError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post(
+        "/v1/assets/from-render",
+        response_model=AssetView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_asset_from_render(request: AssetFromRenderRequest) -> AssetView:
+        try:
+            path = service.frame_path(request.render_id, request.slot)
+            return asset_view(
+                assets.create(
+                    name=request.name,
+                    category=request.category,
+                    filename=path.name,
+                    data=path.read_bytes(),
+                )
+            )
+        except RenderNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (AssetError, OSError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.api_route(
+        "/v1/assets/{asset_id}/media", methods=["GET", "HEAD"], name="asset_media"
+    )
+    def asset_media(asset_id: str) -> FileResponse:
+        try:
+            path = assets.media_path(asset_id)
+        except AssetNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return FileResponse(
+            path,
+            media_type=MEDIA_TYPES.get(path.suffix.lower(), "image/png"),
+            headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.delete("/v1/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_asset(asset_id: str) -> Response:
+        try:
+            assets.delete(asset_id)
+        except AssetNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except AssetError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.post(
         "/v1/projects/{project_id}/pipeline",
         response_model=PipelineView,
@@ -299,6 +379,11 @@ def create_app(
         seed: int | None = Form(None),
         first_frame: UploadFile | None = File(None),
         last_frame: UploadFile | None = File(None),
+        # Additive, optional: reference frames straight from the asset center.
+        # The sibling control plane never sends these, so the frozen contract
+        # is untouched; an uploaded file wins over an asset id.
+        first_frame_asset: str | None = Form(None),
+        last_frame_asset: str | None = Form(None),
     ) -> RenderView:
         try:
             spec = RenderSpec.model_validate(
@@ -314,9 +399,13 @@ def create_app(
             )
             return service.submit(
                 spec,
-                first_frame=await _read_upload(first_frame),
-                last_frame=await _read_upload(last_frame),
+                first_frame=await _read_upload(first_frame)
+                or _asset_frame(assets, first_frame_asset),
+                last_frame=await _read_upload(last_frame)
+                or _asset_frame(assets, last_frame_asset),
             )
+        except AssetNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
         except RenderError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except RenderConflict as error:
@@ -386,3 +475,14 @@ async def _read_upload(upload: UploadFile | None) -> tuple[str, bytes] | None:
     if len(data) > _MAX_REFERENCE_BYTES:
         raise HTTPException(status_code=413, detail="参考图不能超过 25MB")
     return Path(upload.filename).name, data
+
+
+def _asset_frame(
+    assets: AssetStore, asset_id: str | None
+) -> tuple[str, bytes] | None:
+    """Loads an asset as if it had been uploaded; the render keeps its own copy
+    of the bytes, so deleting the asset later never breaks the render."""
+    if not asset_id or not asset_id.strip():
+        return None
+    path = assets.media_path(asset_id.strip())
+    return path.name, path.read_bytes()

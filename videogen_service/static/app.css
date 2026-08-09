@@ -545,6 +545,34 @@ select:focus {
   flex-shrink: 0;
 }
 
+.asset-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.asset-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.asset-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.asset-row .asset-delete {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* ============================================================
    6. Status badges
    ============================================================ */
