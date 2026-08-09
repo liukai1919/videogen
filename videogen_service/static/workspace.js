@@ -409,6 +409,9 @@ async function loadChats(selected) {
   }
   if (keep && [...chatSelect.options].some((o) => o.value === keep)) {
     chatSelect.value = keep;
+  } else if (chats.length) {
+    // 回到工作台时接着最近的对话,而不是对着空白面板。
+    chatSelect.value = chats[0].chat_id;
   }
 }
 
