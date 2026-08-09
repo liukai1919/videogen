@@ -29,9 +29,14 @@ from videogen_service.config import (
     ServiceConfig,
 )
 from videogen_service.renderer import job_seed
+from videogen_service.service import RenderNotFound, RenderService
 
 JOBS_DIRNAME = ".jobs"
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+# 成片合成是内建能力:FFmpeg 在本机把渲染视频、配音音轨和 SRT 字幕拼成成片。
+# 不进 config,因为它不依赖任何模型,只要机器上有 ffmpeg。
+COMPOSE_CAPABILITY_ID = "compose"
+_FFMPEG_TIMEOUT_SECONDS = 1800.0
 
 JobStatus = Literal["QUEUED", "RUNNING", "DONE", "FAILED"]
 
@@ -73,6 +78,21 @@ class JobSpec(StrictModel):
     width: int | None = Field(default=None, ge=32, le=8192)
     height: int | None = Field(default=None, ge=32, le=8192)
     seed: int | None = Field(default=None, ge=0)
+    # compose uses these: the source render, an optional TTS job for the audio
+    # track, and optional SRT text to burn in.
+    render_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    audio_job_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$"
+    )
+    subtitles: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+
+class ComposeCapability(StrictModel):
+    kind: Literal["compose"] = "compose"
+    needs_gpu: bool = False
+
+
+AnyCapability = Capability | ComposeCapability
 
 
 class JobRecord(StrictModel):
@@ -99,13 +119,15 @@ class JobView(StrictModel):
     width: int | None = None
     height: int | None = None
     seed: int | None = None
+    render_id: str | None = None
+    audio_job_id: str | None = None
     created_at: str
     updated_at: str
 
 
 class JobRunner(Protocol):
     def run(
-        self, spec: JobSpec, capability: Capability, *, directory: Path
+        self, spec: JobSpec, capability: AnyCapability, *, directory: Path
     ) -> str:
         """Executes the job, writes its output into `directory`, and returns
         the output filename."""
@@ -114,17 +136,66 @@ class JobRunner(Protocol):
 
 class LocalJobRunner:
     """Executes capabilities with this machine's own tools: ComfyUI workflows
-    for images, a configured local command for TTS. Nothing leaves the box."""
+    for images, a configured local command for TTS, FFmpeg for composition.
+    Nothing leaves the box."""
 
-    def __init__(self, config: ServiceConfig) -> None:
+    def __init__(
+        self, config: ServiceConfig, *, renders: RenderService | None = None
+    ) -> None:
         self._config = config
+        self._renders = renders
 
     def run(
-        self, spec: JobSpec, capability: Capability, *, directory: Path
+        self, spec: JobSpec, capability: AnyCapability, *, directory: Path
     ) -> str:
         if isinstance(capability, ComfyCapability):
             return self._run_comfy(spec, capability, directory=directory)
+        if isinstance(capability, ComposeCapability):
+            return self._run_compose(spec, directory=directory)
         return self._run_command(spec, capability, directory=directory)
+
+    def _run_compose(self, spec: JobSpec, *, directory: Path) -> str:
+        if self._renders is None:
+            raise JobError("合成需要渲染服务在场")
+        try:
+            video = self._renders.media_path(spec.render_id or "")
+        except RenderNotFound as error:
+            raise JobError(str(error)) from error
+        audio: Path | None = None
+        if spec.audio_job_id is not None:
+            audio = _audio_output(
+                self._config.work_dir / JOBS_DIRNAME / spec.audio_job_id
+            )
+        subtitles_name: str | None = None
+        if spec.subtitles is not None:
+            subtitles_name = "subs.srt"
+            write_bytes_atomic(
+                directory / subtitles_name, spec.subtitles.encode("utf-8")
+            )
+        command = ffmpeg_command(
+            video=video, audio=audio, subtitles=subtitles_name, output="output.mp4"
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=directory,
+                capture_output=True,
+                timeout=_FFMPEG_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            raise JobError("找不到 ffmpeg,请先安装并放进 PATH") from error
+        except subprocess.TimeoutExpired as error:
+            raise JobError(
+                f"ffmpeg 合成超时({_FFMPEG_TIMEOUT_SECONDS:.0f}s)"
+            ) from error
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace")[-600:]
+            raise JobError(f"ffmpeg 退出码 {completed.returncode}: {detail}")
+        output = directory / "output.mp4"
+        if not output.is_file() or output.stat().st_size == 0:
+            raise JobError("ffmpeg 结束了但没有产出成片")
+        return "output.mp4"
 
     def _run_comfy(
         self, spec: JobSpec, capability: ComfyCapability, *, directory: Path
@@ -237,6 +308,11 @@ class JobService:
             raise JobError("t2i 任务需要 prompt")
         if capability.kind == "tts" and spec.text is None:
             raise JobError("tts 任务需要 text")
+        if capability.kind == "compose":
+            if spec.render_id is None:
+                raise JobError("compose 任务需要 render_id")
+            if spec.audio_job_id is None and spec.subtitles is None:
+                raise JobError("compose 任务至少需要配音(audio_job_id)或字幕(subtitles)")
         with self._lock:
             if self._load(spec.job_id) is not None:
                 raise JobConflict(f"job id {spec.job_id} 已存在")
@@ -355,12 +431,14 @@ class JobService:
         except Exception as error:
             self._fail(spec.job_id, f"{type(error).__name__}: {error}")
 
-    def _capability(self, capability_id: str) -> Capability:
+    def _capability(self, capability_id: str) -> AnyCapability:
+        if capability_id == COMPOSE_CAPABILITY_ID:
+            return ComposeCapability()
         capability = self._config.capabilities.get(capability_id)
         if capability is None:
             raise JobError(
                 f"未配置的能力: {capability_id};可用: "
-                f"{sorted(self._config.capabilities) or '(无)'}"
+                f"{sorted([*self._config.capabilities, COMPOSE_CAPABILITY_ID])}"
             )
         return capability
 
@@ -422,6 +500,49 @@ class JobService:
         )
 
 
+def ffmpeg_command(
+    *, video: Path, audio: Path | None, subtitles: str | None, output: str
+) -> list[str]:
+    """The composition command, kept pure for tests. Runs with cwd at the job
+    directory, so `subtitles`/`output` are bare filenames and the subtitles
+    filter needs no path escaping; inputs stay absolute."""
+    command = ["ffmpeg", "-hide_banner", "-y", "-i", str(video)]
+    if audio is not None:
+        command += ["-i", str(audio)]
+    if subtitles is not None:
+        # Burning subtitles re-encodes the video; without them the stream is
+        # copied untouched.
+        command += [
+            "-vf",
+            f"subtitles={subtitles}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+        ]
+    else:
+        command += ["-c:v", "copy"]
+    if audio is not None:
+        # The narration track replaces whatever the source carried. No
+        # -shortest: a narration briefer than the picture must not cut it.
+        command += ["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
+    else:
+        command += ["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
+    command.append(output)
+    return command
+
+
+def _audio_output(directory: Path) -> Path:
+    for candidate in sorted(directory.glob("output.*")):
+        if candidate.suffix.lower() in {".wav", ".mp3", ".flac", ".ogg"}:
+            return candidate
+    raise JobError(
+        f"配音任务 {directory.name} 没有音频产物,确认它已经 DONE"
+    )
+
+
 def _view(record: JobRecord) -> JobView:
     spec = record.spec
     return JobView(
@@ -440,6 +561,8 @@ def _view(record: JobRecord) -> JobView:
         width=spec.width,
         height=spec.height,
         seed=spec.seed,
+        render_id=spec.render_id,
+        audio_job_id=spec.audio_job_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )

@@ -231,9 +231,13 @@ function errorLine(card, text) {
 }
 
 function jobCard(job) {
-  const kindLabel = job.kind === "t2i" ? "图片" : job.kind === "tts" ? "配音" : job.kind;
+  const kindLabel =
+    { t2i: "图片", tts: "配音", compose: "成片" }[job.kind] || job.kind;
   const card = baseCard(`${kindLabel} · ${job.capability}`, job.status);
-  promptLine(card, job.prompt || job.text);
+  promptLine(
+    card,
+    job.prompt || job.text || (job.render_id ? `来自渲染 ${job.render_id}` : ""),
+  );
   errorLine(card, job.error);
   if (job.status === "DONE" && job.media_url) {
     if (job.kind === "t2i") {
@@ -243,6 +247,14 @@ function jobCard(job) {
       img.className = "preview";
       img.loading = "lazy";
       card.append(img);
+    } else if (job.kind === "compose") {
+      const video = document.createElement("video");
+      video.src = job.media_url;
+      video.controls = true;
+      video.preload = "metadata";
+      video.playsInline = true;
+      video.className = "preview";
+      card.append(video);
     } else {
       const audio = document.createElement("audio");
       audio.controls = true;
@@ -292,6 +304,14 @@ function jobCard(job) {
       }
     });
     actions.append(retry);
+  }
+  if (job.status === "DONE" && job.kind === "compose" && job.media_url) {
+    const download = document.createElement("a");
+    download.className = "button button-secondary";
+    download.href = job.media_url;
+    download.download = `${job.job_id}.mp4`;
+    download.textContent = "下载成片";
+    actions.append(download);
   }
   if (["DONE", "FAILED"].includes(job.status)) {
     const remove = document.createElement("button");

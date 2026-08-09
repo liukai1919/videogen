@@ -30,6 +30,7 @@ from videogen_service.config import ServiceConfig, load_config
 from videogen_service.documents import DocumentError, extract_text
 from videogen_service.export import build_project_export
 from videogen_service.jobs import (
+    COMPOSE_CAPABILITY_ID,
     JOB_MEDIA_TYPES,
     JobConflict,
     JobError,
@@ -38,6 +39,7 @@ from videogen_service.jobs import (
     JobService,
     JobSpec,
     JobView,
+    LocalJobRunner,
 )
 from videogen_service.memory import MemoryEntry, MemoryNotFound, MemoryStore
 from videogen_service.models import (
@@ -124,7 +126,11 @@ def create_app(
     pipeline = PipelineService(
         settings, renders=service, projects=projects, studio=workshop
     )
-    jobs = JobService(settings, runner=job_runner, gpu_gate=gpu_gate)
+    jobs = JobService(
+        settings,
+        runner=job_runner or LocalJobRunner(settings, renders=service),
+        gpu_gate=gpu_gate,
+    )
     agent = AgentService(
         settings,
         toolbox=ToolBox(
@@ -417,6 +423,16 @@ def create_app(
                 settings.capabilities.items()
             )
         ]
+        # 成片合成是内建能力:渲染视频 + 配音 + 字幕 → FFmpeg 出成片。
+        catalog.append(
+            {
+                "capability_id": COMPOSE_CAPABILITY_ID,
+                "kind": "compose",
+                "output": "video",
+                "submit_via": "jobs",
+                "needs_gpu": False,
+            }
+        )
         return catalog
 
     @app.post(

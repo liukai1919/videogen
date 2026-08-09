@@ -29,7 +29,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from videogen_service.artifacts import write_json_atomic
 from videogen_service.assets import AssetStore
 from videogen_service.config import ServiceConfig
-from videogen_service.jobs import JobError, JobNotFound, JobService, JobSpec
+from videogen_service.export import narration_srt
+from videogen_service.jobs import (
+    COMPOSE_CAPABILITY_ID,
+    JobError,
+    JobNotFound,
+    JobService,
+    JobSpec,
+)
 from videogen_service.memory import MemoryStore
 from videogen_service.models import RenderSpec, ScriptOptions
 from videogen_service.renderer import RenderError
@@ -238,8 +245,20 @@ class ToolBox:
                 ["idea"],
             ),
             tool(
+                "compose_video",
+                "用 FFmpeg 把一条完成的渲染合成为成片:换上配音音轨、烧入字幕。"
+                "配音先用 generate_speech 生成,字幕用 write_storyboard 返回的"
+                " narration_srt。立即返回 job_id。",
+                {
+                    "render_id": {**text, "description": "已完成的渲染 id"},
+                    "audio_job_id": {**text, "description": "配音任务 id,可省略"},
+                    "subtitles_srt": {**text, "description": "SRT 字幕原文,可省略"},
+                },
+                ["render_id"],
+            ),
+            tool(
                 "check_job",
-                "查一条图片/配音任务的状态。",
+                "查一条图片/配音/合成任务的状态。",
                 {"job_id": text},
                 ["job_id"],
             ),
@@ -269,6 +288,7 @@ class ToolBox:
             "generate_image": self._generate_image,
             "generate_speech": self._generate_speech,
             "generate_video": self._generate_video,
+            "compose_video": self._compose_video,
             "write_storyboard": self._write_storyboard,
             "check_job": self._check_job,
             "check_render": self._check_render,
@@ -345,6 +365,22 @@ class ToolBox:
         )
         return {"render_id": view.render_id, "status": view.status}
 
+    def _compose_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        subtitles = arguments.get("subtitles_srt")
+        spec = JobSpec(
+            job_id=_mint_id("job"),
+            capability=COMPOSE_CAPABILITY_ID,
+            render_id=str(arguments["render_id"]),
+            audio_job_id=(
+                str(arguments["audio_job_id"])
+                if arguments.get("audio_job_id")
+                else None
+            ),
+            subtitles=str(subtitles) if subtitles else None,
+        )
+        view = self._jobs.submit(spec)
+        return {"job_id": view.job_id, "status": view.status}
+
     def _write_storyboard(self, arguments: dict[str, Any]) -> dict[str, Any]:
         options_payload: dict[str, Any] = {}
         if arguments.get("target_seconds"):
@@ -363,6 +399,11 @@ class ToolBox:
             "seconds": result.seconds,
             "prompt": result.prompt,
             "narrations": [shot.narration for shot in result.shots],
+            # Ready for compose_video's subtitles_srt: cue times follow the
+            # padded timeline the renderer actually produces.
+            "narration_srt": narration_srt(
+                result.shots, fps=self._config.renderer.fps
+            ),
         }
 
     def _check_job(self, arguments: dict[str, Any]) -> dict[str, Any]:

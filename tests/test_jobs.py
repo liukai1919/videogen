@@ -1,15 +1,15 @@
+from datetime import UTC, datetime
 from pathlib import Path
 import threading
 import time
 from typing import Callable
 
 from fastapi.testclient import TestClient
-import pytest
 
 from videogen_service.api import create_app
 from videogen_service.artifacts import write_bytes_atomic
 from videogen_service.config import Capability, ServiceConfig
-from videogen_service.jobs import JobService, JobSpec
+from videogen_service.jobs import JobRecord, JobService, JobSpec
 from videogen_service.models import RenderProgress, RenderRequest
 
 _PNG = b"\x89PNG\r\n\x1a\nfake-image"
@@ -312,19 +312,25 @@ def test_gpu_jobs_and_renders_share_one_gate(tmp_path: Path) -> None:
 
 
 def test_restart_recovery_fails_interrupted_jobs(tmp_path: Path) -> None:
+    # A RUNNING record written straight to disk stands in for the crashed
+    # service, so no live worker races the recovery we are asserting on.
     config = make_config(tmp_path)
-    service = JobService(config, runner=GatedRunner())
-    spec = JobSpec(job_id="job_int", capability="flux-t2i", prompt="画")
-    service.submit(spec)
-    # Simulated crash: a fresh service over the same directory recovers.
-    revived = JobService(config, runner=FakeRunner())
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        state = revived.get("job_int")
-        if state.status == "FAILED":
-            break
-        time.sleep(0.01)
-    assert revived.get("job_int").status == "FAILED"
-    assert "重启" in str(revived.get("job_int").error)
-    revived.close()
-    service.close()
+    now = datetime.now(UTC).isoformat()
+    record = JobRecord(
+        spec=JobSpec(job_id="job_int", capability="flux-t2i", prompt="画"),
+        kind="t2i",
+        status="RUNNING",
+        created_at=now,
+        updated_at=now,
+    )
+    path = config.work_dir / ".jobs" / "job_int" / "job.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(record.model_dump_json(), encoding="utf-8")
+
+    service = JobService(config, runner=FakeRunner())
+    try:
+        view = service.get("job_int")
+        assert view.status == "FAILED"
+        assert "重启" in str(view.error)
+    finally:
+        service.close()
