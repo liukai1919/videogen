@@ -1206,6 +1206,192 @@ select:focus {
 }
 
 /* ============================================================
+   10.5 Workspace(三区工作台)
+   ============================================================ */
+.ws-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) 400px;
+  min-height: 100vh;
+}
+
+.ws-side {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 14px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ws-panel h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-transform: none;
+}
+
+.ws-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.ws-asset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ws-asset {
+  margin: 0;
+}
+
+.ws-asset img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.ws-asset figcaption {
+  font-size: 11px;
+  color: var(--text-subtle);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-main {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.ws-main-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.ws-main-head h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.ws-chat {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ws-chat-head {
+  display: flex;
+  gap: 8px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-chat-head .field-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ws-msg {
+  max-width: 92%;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-msg-user {
+  align-self: flex-end;
+  background: var(--accent, #7c5cff);
+  color: #fff;
+}
+
+.ws-msg-assistant {
+  align-self: flex-start;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+}
+
+.ws-msg-tool {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.ws-msg-thinking {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.ws-composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.ws-composer textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+@media (max-width: 1100px) {
+  .ws-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ws-side,
+  .ws-chat {
+    position: static;
+    height: auto;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ws-messages {
+    max-height: 50vh;
+  }
+}
+
+/* ============================================================
    11. Reduced motion
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {

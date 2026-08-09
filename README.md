@@ -88,9 +88,13 @@ Copy-Item config.example.yaml config.yaml
 - 原项目只配置 `videogen.service_url`、等待时间、本地预览目录和 B 站投稿声明。
 - `story` 依赖 `ComfyUI_MiniMaxH3_Director`；不使用时可从本项目配置中删掉该模式。
 
+## 工作台
+
+`http://127.0.0.1:8020/workspace` 是平台的主界面，MiniMax Design 式的三区布局：左侧项目/Skill/资产中心，中间产物区（Agent 排的图片、配音、视频任务和手动渲染合成一条时间流，图片可直接存资产），右侧 Agent 对话（新建会话、发消息，工具调用和结果内联展示，长渲染不卡对话——Agent 只排队并报任务 id，产物区自动刷新）。原来的手动生成台还在 `/`，两边互通同一批数据。
+
 ## HTTP seam
 
-- `GET /`、`GET /static/*`：视频生成台页面和它的三个静态文件。
+- `GET /`、`GET /workspace`、`GET /static/*`：手动生成台、Agent 工作台和它们的静态文件。
 - `GET /health`：模式、分镜模式和限制。字段是和 `videotube` 之间的固定契约（那边用 `extra="forbid"` 解析），新东西一律不要往里加。
 - `GET /v1/scripts/config`：字幕总结的配置，页面用它决定默认时长和分镜数。
 - `POST /v1/scripts`：传一个 YouTube 网址，取字幕、让 Ollama 总结成分镜脚本。可选 `skill` 套用一份具名创作规范，可选 `project_id` 把结果自动存成项目草稿。

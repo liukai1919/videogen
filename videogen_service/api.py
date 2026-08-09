@@ -165,6 +165,10 @@ def create_app(
     def console() -> FileResponse:
         return _static_file("videogen.html", "text/html; charset=utf-8")
 
+    @app.get("/workspace", response_class=HTMLResponse)
+    def workspace() -> FileResponse:
+        return _static_file("workspace.html", "text/html; charset=utf-8")
+
     @app.get("/static/{name}")
     def static_file(name: str) -> FileResponse:
         media_type = _STATIC_TYPES.get(Path(name).suffix)
