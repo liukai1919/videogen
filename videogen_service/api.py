@@ -18,6 +18,7 @@ from videogen_service.agent import (
     ChatSummary,
     ToolBox,
 )
+from videogen_service.agents import UnknownAgent, build_manager
 from videogen_service.assets import (
     MEDIA_TYPES,
     AssetError,
@@ -131,6 +132,8 @@ def create_app(
         runner=job_runner or LocalJobRunner(settings, renders=service),
         gpu_gate=gpu_gate,
     )
+    # 外部 Agent worker 层(Claude Code/Codex):云端推理,不碰渲染执行。
+    agent_workers = build_manager(settings)
     agent = AgentService(
         settings,
         toolbox=ToolBox(
@@ -143,6 +146,7 @@ def create_app(
         ),
         client=chat_client,
         memory=memory,
+        workers=agent_workers,
     )
 
     @asynccontextmanager
@@ -157,6 +161,7 @@ def create_app(
 
     app = FastAPI(title="VideoTube Videogen", version="0.1.0", lifespan=lifespan)
     app.state.render_service = service
+    app.state.agent_workers = agent_workers
 
     @app.middleware("http")
     async def refuse_cross_site_requests(
@@ -382,9 +387,11 @@ def create_app(
         # One agent turn can take minutes of local model time; this sync
         # handler runs on the worker threadpool like /v1/scripts does.
         try:
-            return agent.send(chat_id, request.text)
+            return agent.send(chat_id, request.text, agent=request.agent)
         except ChatNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+        except UnknownAgent as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         except AgentUnavailable as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
@@ -434,6 +441,21 @@ def create_app(
             }
         )
         return catalog
+
+    @app.get("/v1/agents")
+    async def list_agent_workers() -> list[dict[str, object]]:
+        """外部 Agent worker 目录:配置了谁、CLI 是否真的装好能跑。"""
+        health = await agent_workers.health_check()
+        return [
+            {
+                "agent": name,
+                "enabled": worker.enabled,
+                "available": health.get(name, False),
+                "timeout_seconds": worker.timeout_seconds,
+                "primary": name == settings.agent_defaults.primary,
+            }
+            for name, worker in sorted(settings.agents.items())
+        ]
 
     @app.post(
         "/v1/jobs", response_model=JobView, status_code=status.HTTP_202_ACCEPTED

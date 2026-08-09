@@ -1309,6 +1309,20 @@ select:focus {
   min-width: 0;
 }
 
+.ws-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-agent-row .field-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+
 .ws-messages {
   flex: 1;
   overflow-y: auto;
@@ -1351,6 +1365,17 @@ select:focus {
 .ws-msg-thinking {
   opacity: 0.7;
   font-style: italic;
+}
+
+/* 外部 Agent(云端 CLI)答的消息:留一道竖线和署名,和本地大脑区分开。 */
+.ws-msg-external {
+  border-left: 3px solid var(--accent, #7c5cff);
+}
+
+.ws-msg-agent-label {
+  font-size: 11px;
+  color: var(--text-subtle);
+  margin-bottom: 4px;
 }
 
 .ws-composer {

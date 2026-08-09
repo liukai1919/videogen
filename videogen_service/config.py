@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
+from videogen_service.agents.config import AgentDefaults, AgentWorkerConfig
+
 RenderMode = Literal["t2v", "i2v", "flf2v", "story"]
 
 
@@ -145,6 +147,10 @@ class ServiceConfig(StrictModel):
     modes: dict[RenderMode, ModeConfig]
     # 平台能力注册表:除 H3 视频(modes)之外的本地生成能力(文生图、TTS…)。
     capabilities: dict[str, Capability] = Field(default_factory=dict)
+    # 外部 Agent worker(Claude Code / Codex CLI):云端推理层,按名字点用。
+    # 本地生成不经过它们;没配置时整个层不存在,一切照旧。
+    agents: dict[str, AgentWorkerConfig] = Field(default_factory=dict)
+    agent_defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
     @model_validator(mode="after")
     def validate_modes(self) -> "ServiceConfig":
@@ -157,6 +163,13 @@ class ServiceConfig(StrictModel):
                 raise ValueError(
                     f"capability id 只能是字母数字下划线连字符: {capability_id}"
                 )
+        # 配了 agent 却让一个没配的当 primary,fallback 链一启动就空转。
+        # fallback 里未配置的名字允许存在(运行时跳过),primary 必须真实。
+        if self.agents and self.agent_defaults.primary not in self.agents:
+            raise ValueError(
+                f"agent_defaults.primary '{self.agent_defaults.primary}' "
+                f"不在 agents 配置里: {sorted(self.agents)}"
+            )
         # A generated storyboard is submitted through the same /v1/renders seam
         # as a hand-written one, so it has to fit the renderer's own limits.
         if self.script.max_shots > self.renderer.max_shots:
@@ -202,6 +215,16 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
                 }
             )
         capabilities[capability_id] = capability
+    agents = {
+        name: (
+            worker.model_copy(
+                update={"working_dir": _resolve_path(base_dir, worker.working_dir)}
+            )
+            if worker.working_dir is not None
+            else worker
+        )
+        for name, worker in config.agents.items()
+    }
     return config.model_copy(
         update={
             "work_dir": work_dir,
@@ -209,6 +232,7 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
             "modes": modes,
             "script": script,
             "capabilities": capabilities,
+            "agents": agents,
         }
     )
 

@@ -103,7 +103,7 @@ Copy-Item config.example.yaml config.yaml
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
 - `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
-- `POST/GET /v1/chats`、`GET/DELETE /v1/chats/{id}`、`POST /v1/chats/{id}/messages`：Agent 对话。本地 Ollama tool-calling 循环，工具即平台能力：写分镜、排图片/配音任务、排 H3 渲染（可引用资产做参考帧）、查任务进度、看资产、记偏好。生成类工具只排队并立即返回任务 id，长渲染不会卡住对话；Memory 偏好自动注入系统提示；会话落盘 `work/.chats/`。
+- `POST/GET /v1/chats`、`GET/DELETE /v1/chats/{id}`、`POST /v1/chats/{id}/messages`：Agent 对话。tool-calling 循环，工具即平台能力：写分镜、排图片/配音任务、排 H3 渲染（可引用资产做参考帧）、查任务进度、失败诊断（`inspect_failure`：报错原文 + 提交参数 + 工作流配置 + ComfyUI 连通性）、看资产、记偏好。默认大脑是本地 Ollama（原生 tool calls）；请求带 `agent: claude/codex` 时**同一套循环由云端 CLI 驱动**——工具调用走 fenced-JSON 文本协议，云端只出决策，执行永远在本机。生成类工具只排队并立即返回任务 id，长渲染不会卡住对话；Memory 偏好自动注入系统提示；会话落盘 `work/.chats/`。
 - `GET /v1/capabilities`：平台能力目录——H3 视频各模式（提交走 `/v1/renders`）加上 config `capabilities` 里声明的本地能力（文生图、TTS，提交走 `/v1/jobs`）。
 - `POST/GET /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs/{id}/media`、`POST /v1/jobs/{id}/retry`、`DELETE /v1/jobs/{id}`、`POST /v1/jobs/{id}/save-asset`：通用生成任务队列。t2i 走 ComfyUI workflow（和渲染同一套节点指针机制），tts 走 config 里的本地命令模板，内建 `compose` 能力用 FFmpeg 把完成的渲染 + 配音音轨 + SRT 字幕合成成片（换音轨时视频流直拷，烧字幕才重编码，旁白短于画面不截断视频）；`needs_gpu` 的任务和 H3 渲染共享一把 GPU 锁轮流上卡，图片产物可一键存进资产中心。
 - `POST /v1/scripts/document`：上传本地 PDF/Word/文本，本机抽文本后走同一条 Ollama 总结路径生成分镜。
@@ -175,9 +175,27 @@ QUEUED → SCRIPTING（yt-dlp 取字幕 + Ollama 出脚本,自动存为项目草
 - **项目**：一次创作的容器，落盘在 `work/.projects/<project_id>/project.json`。页面顶部选中一个项目后，生成的分镜脚本自动存成一版草稿（可随时回填表单重渲），提交的渲染自动挂进项目。删除项目不动已关联的渲染。
 - **Skill**：`skills/` 下每个子目录一份具名创作规范，结构是两个文件——`SKILL.md`（给模型读的说明书，整体注入总结 Prompt）和 `meta.yaml`（名称、描述、分类和可选默认参数 style/target_seconds/shot_seconds/max_shots/output_language）。请求里显式给的字段永远压过 Skill 默认值，Skill 默认值压过 config 默认值；`额外要求` 排在 Skill 规范之后，单次覆盖仍然可行。改动 Skill 文件立即生效，不用重启服务；写坏的 Skill 只会自己下线并留一条警告。仓库自带 `skills/science-doc` 作为样例。
 
+## 外部 Agent worker(可选)
+
+`videogen_service/agents/` 把云端编码/推理 CLI(目前 Claude Code、Codex CLI)接成统一的 worker 层:云端 Agent 是**推理层**,本服务是**编排层**,5090 + ComfyUI + FFmpeg 是**执行层**——显卡只留给视频/图片,不再被通用 LLM 占着。工作台对话里选中某个云端 Agent 后,它就是这一轮的大脑:走和本地 Ollama 完全相同的工具循环,能排渲染/图片/配音任务、查进度、做失败诊断;工具调用由 CLI 以 fenced-JSON 文本协议给出,本服务解析并执行,CLI 自身保持只读沙箱。
+
+在 `config.yaml` 的 `agents:` 里按名字启用(见 `config.example.yaml` 的注释样例),`agent_defaults:` 定 primary 和 fallback 链。业务代码永远不直接拼 subprocess,只经 `AgentManager`:
+
+```python
+from videogen_service.agents import build_manager
+
+manager = build_manager(config)
+result = await manager.run(agent="claude", task="分析这条渲染流水线")
+result = await manager.run_with_fallback(task="…")   # primary 挂了自动换下家
+```
+
+每个 adapter 都是 headless 调用(prompt 走 stdin,Claude 用 `--output-format json`,Codex 用 `exec --output-last-message`),默认只读沙箱、限死在 `work/.agents/workspace`、带硬超时,超时/取消会连子进程树一起杀。某个 CLI 没装只是健康检查报 false(`GET /v1/agents` 可查,启动自检也有一行),fallback 链自动跳过,绝不拖垮本地渲染。本地 Ollama 那套照旧保留。
+
 ## 验证
 
 ```bash
 python -m pytest -q
 python -m mypy videogen_service
 ```
+
+真实 CLI 集成测试默认跳过(会耗订阅额度),要跑:`AGENT_CLI_TESTS=1 python -m pytest tests/test_agents.py`。

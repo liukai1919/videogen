@@ -75,7 +75,7 @@
       "shift_video": 12.0,
       "shift_audio": 3.0,
       "bd_grp_perf": "性能 Performance",
-      "clear_vram_between_segments": true,
+      "clear_vram_between_segments": false,
       "export_source_images": false
     },
     "_meta": {

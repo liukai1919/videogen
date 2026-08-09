@@ -1,8 +1,10 @@
-# The platform's brain: a local tool-calling agent over Ollama's /api/chat.
-# The user talks, the model plans, and every tool it may call is one of this
+# The platform's brain: a tool-calling agent whose every tool is one of this
 # machine's own capabilities — submit an image or TTS job, queue an H3 render,
-# draft a storyboard, browse assets, remember a preference. Nothing here
-# touches a cloud API.
+# draft a storyboard, browse assets, remember a preference. The default brain
+# is the local Ollama model (/api/chat, native tool calls); a configured cloud
+# CLI worker (claude/codex) can drive the very same loop instead, its tool
+# calls carried over a fenced-JSON text protocol — reasoning may go to the
+# cloud, execution always stays on this machine.
 #
 # Long generations never block a chat turn: generation tools SUBMIT work and
 # return a job/render id immediately; the model reports the id and can check
@@ -12,6 +14,7 @@
 # Sessions are durable: work/.chats/<chat_id>/chat.json, same atomic style as
 # every other store.
 
+import asyncio
 from datetime import UTC, datetime
 import json
 import logging
@@ -26,6 +29,7 @@ import urllib.request
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from videogen_service.agents import AgentManager
 from videogen_service.artifacts import write_json_atomic
 from videogen_service.assets import AssetStore
 from videogen_service.config import ServiceConfig
@@ -52,7 +56,7 @@ _CHAT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 CHATS_DIRNAME = ".chats"
 # A model that keeps calling tools without answering is looping, not working.
 _MAX_TOOL_ROUNDS = 8
-_MAX_TURN_MESSAGES = 60  # context sent to Ollama per turn, newest kept
+_MAX_TURN_MESSAGES = 60  # context sent to the brain per turn, newest kept
 
 
 class AgentError(RuntimeError):
@@ -77,6 +81,8 @@ class ChatMessage(StrictModel):
     # Ollama's tool_calls shape is stored verbatim so a transcript replays.
     tool_calls: list[dict[str, Any]] | None = None
     tool_name: str | None = None
+    # 哪个外部 Agent worker 答的这条(claude/codex…);None = 本地大脑。
+    agent: str | None = None
     created_at: str
 
 
@@ -147,6 +153,120 @@ class OllamaChatClient:
         if not isinstance(message, dict):
             raise AgentUnavailable("Ollama 没有返回 message")
         return message
+
+
+class WorkerChatClient:
+    """ChatClient over one external CLI worker (claude/codex): the same tool
+    loop as the local brain, with tool calls carried in a fenced-JSON text
+    protocol because headless CLIs have no native tool-calling seam. The CLIs
+    are stateless between invocations, so each round is one fresh call with
+    the whole conversation in the prompt."""
+
+    def __init__(self, workers: AgentManager, agent: str) -> None:
+        self._workers = workers
+        self._agent = agent
+
+    def chat(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        # send() runs on FastAPI's worker threads, so this thread owns no
+        # event loop and asyncio.run is safe.
+        result = asyncio.run(
+            self._workers.run(self._agent, _worker_prompt(messages, tools))
+        )
+        if not result.success or not result.output:
+            raise AgentUnavailable(
+                f"外部 Agent {self._agent} 没答上来: {result.error or '回答是空的'}"
+            )
+        return _parse_worker_reply(result.output)
+
+
+def _worker_prompt(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+) -> str:
+    """One self-contained prompt: the system rules, the tool catalog with the
+    calling protocol, then the transcript so far."""
+    lines = [
+        str(message.get("content") or "")
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    lines += [
+        "",
+        "## 工具调用协议",
+        "下面是你能调用的工具(JSON Schema)。要调用工具时,这一轮只输出一个",
+        '```json 代码块,内容是 {"tool": "<工具名>", "arguments": {...}};',
+        "一次一个工具,代码块外不要写别的。结果会出现在下一轮的对话记录里。",
+        "不需要工具时,直接输出给用户的最终回答(纯文本,不要 ```json 块)。",
+        "",
+        "## 可用工具",
+        "```json",
+        json.dumps(tools, ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "## 对话记录",
+    ]
+    for message in messages:
+        role = message.get("role")
+        content = str(message.get("content") or "")
+        if role == "user":
+            lines.append(f"用户: {content}")
+        elif role == "assistant":
+            calls = message.get("tool_calls")
+            if calls:
+                lines.append(f"你(工具调用): {json.dumps(calls, ensure_ascii=False)}")
+            if content:
+                lines.append(f"你: {content}")
+        elif role == "tool":
+            name = message.get("tool_name") or "unknown"
+            lines.append(f"工具 {name} 返回: {content}")
+    lines += ["", "现在输出你的下一步:工具调用的 ```json 块,或给用户的最终回答。"]
+    return "\n".join(lines)
+
+
+_JSON_BLOCK = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+
+
+def _parse_worker_reply(output: str) -> dict[str, Any]:
+    """The worker's text turned into an Ollama-shaped assistant message:
+    fenced {"tool": …} JSON becomes tool_calls, everything else stays text."""
+    calls: list[dict[str, Any]] = []
+    content = output
+    for match in _JSON_BLOCK.finditer(output):
+        payloads = _tool_payloads(match.group(1))
+        if payloads:
+            calls += payloads
+            content = content.replace(match.group(0), "", 1)
+    if not calls:
+        # 有的模型不写 fence,整条回复就是一个裸 JSON 工具调用。
+        bare = _tool_payloads(output)
+        if bare:
+            return {"content": "", "tool_calls": bare}
+    return {"content": content.strip(), "tool_calls": calls or None}
+
+
+def _tool_payloads(text: str) -> list[dict[str, Any]]:
+    """{"tool": …, "arguments": …} objects (one or a list) in Ollama's
+    tool_calls shape; anything else → []."""
+    try:
+        parsed = json.loads(text.strip())
+    except json.JSONDecodeError:
+        return []
+    items = parsed if isinstance(parsed, list) else [parsed]
+    payloads: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("tool"), str):
+            return []
+        arguments = item.get("arguments")
+        payloads.append(
+            {
+                "function": {
+                    "name": item["tool"],
+                    "arguments": arguments if isinstance(arguments, dict) else {},
+                }
+            }
+        )
+    return payloads
 
 
 class ToolBox:
@@ -269,6 +389,14 @@ class ToolBox:
                 ["render_id"],
             ),
             tool(
+                "inspect_failure",
+                "失败诊断:打包一条失败渲染/任务的完整上下文(报错原文、提交"
+                "参数、对应工作流配置、ComfyUI 连通性),据此分析原因并给出"
+                "修复步骤。给 render_id 或 job_id 其中一个。",
+                {"render_id": text, "job_id": text},
+                [],
+            ),
+            tool(
                 "list_assets",
                 "列出资产中心里可复用的参考图(角色、场景、风格包…)。",
                 {},
@@ -292,6 +420,7 @@ class ToolBox:
             "write_storyboard": self._write_storyboard,
             "check_job": self._check_job,
             "check_render": self._check_render,
+            "inspect_failure": self._inspect_failure,
             "list_assets": self._list_assets,
             "save_memory": self._save_memory,
         }
@@ -424,6 +553,69 @@ class ToolBox:
             "media_url": view.media_url,
         }
 
+    def _inspect_failure(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        render_id = str(arguments.get("render_id") or "").strip()
+        job_id = str(arguments.get("job_id") or "").strip()
+        if not render_id and not job_id:
+            raise ValueError("要给 render_id 或 job_id 其中一个")
+        report: dict[str, Any] = {"comfyui": self._comfyui_status()}
+        if render_id:
+            view = self._renders.get(render_id)
+            report["render"] = {
+                "render_id": view.render_id,
+                "status": view.status,
+                "error": view.error,
+            }
+            # The submitted parameters live on the console listing; the frozen
+            # RenderView contract carries state only.
+            summary = next(
+                (
+                    entry
+                    for entry in self._renders.list_renders()
+                    if entry.render_id == render_id
+                ),
+                None,
+            )
+            if summary is not None:
+                report["render"] |= {
+                    "mode": summary.mode,
+                    "width": summary.width,
+                    "height": summary.height,
+                    "seconds": summary.seconds,
+                    "prompt": summary.prompt,
+                }
+                mode = self._config.modes.get(summary.mode)
+                if mode is not None:
+                    report["workflow"] = {
+                        "workflow_file": str(mode.workflow_file),
+                        "inputs": mode.inputs,
+                    }
+        if job_id:
+            job = self._jobs.get(job_id)
+            report["job"] = {
+                "job_id": job.job_id,
+                "capability": job.capability,
+                "kind": job.kind,
+                "status": job.status,
+                "error": job.error,
+                "render_id": job.render_id,
+                "audio_job_id": job.audio_job_id,
+            }
+        return report
+
+    def _comfyui_status(self) -> dict[str, Any]:
+        """Reachability first: the single most common failure is ComfyUI
+        simply not running."""
+        base_url = self._config.comfyui.base_url.rstrip("/")
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/system_stats", timeout=3
+            ) as response:
+                response.read()
+        except (URLError, TimeoutError, OSError) as error:
+            return {"base_url": base_url, "reachable": False, "detail": str(error)}
+        return {"base_url": base_url, "reachable": True}
+
     def _list_assets(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return {
             "assets": [
@@ -457,11 +649,14 @@ class AgentService:
         toolbox: ToolBox,
         client: ChatClient | None = None,
         memory: MemoryStore | None = None,
+        # 外部 Agent worker 层;None = 只有本地大脑。
+        workers: AgentManager | None = None,
     ) -> None:
         self._config = config
         self._toolbox = toolbox
         self._client = client or OllamaChatClient(config)
         self._memory = memory or MemoryStore(config.work_dir)
+        self._workers = workers
         self._directory = config.work_dir / CHATS_DIRNAME
         self._lock = Lock()
 
@@ -493,6 +688,16 @@ class AgentService:
                 entry["tool_name"] = message.tool_name
             payload.append(entry)
         return payload
+
+    # Sits above `list` below: the annotation mentions the shadowed builtin.
+    def _worker_client(self, agent: str) -> ChatClient:
+        """The external worker wrapped as a ChatClient, so a cloud CLI turn
+        runs the exact same tool loop as the local brain. An unknown agent
+        name raises UnknownAgent here — before any quota is spent."""
+        if self._workers is None:
+            raise AgentUnavailable("外部 Agent 层没有装配,这台服务只有本地大脑")
+        self._workers.adapter(agent)
+        return WorkerChatClient(self._workers, agent)
 
     def list(self) -> list[ChatSummary]:
         with self._lock:
@@ -526,22 +731,42 @@ class AgentService:
                 raise AgentError(f"拒绝删除会话目录之外的路径: {directory}")
             shutil.rmtree(directory)
 
-    def send(self, chat_id: str, text: str) -> ChatRecord:
+    def send(
+        self, chat_id: str, text: str, *, agent: str | None = None
+    ) -> ChatRecord:
         """One user turn: appends the message, loops model+tools until the
-        model answers in text, persists the whole exchange."""
+        model answers in text, persists the whole exchange. With `agent` the
+        same loop runs on that external worker instead of the local brain —
+        the cloud CLI picks the tool calls, this process executes them."""
+        client = self._worker_client(agent) if agent is not None else self._client
         with self._lock:
             record = self._require(chat_id)
         messages = [*record.messages, _message("user", text)]
         tools = self._toolbox.definitions()
+        ran_tools = False
         for _ in range(_MAX_TOOL_ROUNDS):
-            reply = self._client.chat(
-                self._conversation(messages), tools=tools
-            )
+            try:
+                reply = client.chat(self._conversation(messages), tools=tools)
+            except AgentUnavailable:
+                if not ran_tools:
+                    # 一轮工具都没跑:不落盘,对外表现和大脑掉线一样。
+                    raise
+                # 工具已经排过任务:宁可留下半程记录,也不能丢任务 id。
+                messages.append(
+                    _message(
+                        "assistant",
+                        "(大脑中途失联,这一轮先停在这里;"
+                        "上面工具结果里的任务 id 仍然有效,可继续查询)",
+                        agent=agent,
+                    )
+                )
+                break
             tool_calls = reply.get("tool_calls")
             assistant = _message(
                 "assistant",
                 str(reply.get("content") or ""),
                 tool_calls=tool_calls if isinstance(tool_calls, list) else None,
+                agent=agent,
             )
             messages.append(assistant)
             if not assistant.tool_calls:
@@ -563,6 +788,7 @@ class AgentService:
                         except json.JSONDecodeError:
                             pass
                 result = self._toolbox.call(name, arguments)
+                ran_tools = True
                 messages.append(
                     _message(
                         "tool",
@@ -575,6 +801,7 @@ class AgentService:
                 _message(
                     "assistant",
                     "工具调用轮数超限,先停在这里;请把需求拆小一点再继续。",
+                    agent=agent,
                 )
             )
         with self._lock:
@@ -591,11 +818,13 @@ class AgentService:
 
     def _system_prompt(self) -> str:
         lines = [
-            "你是一个本地视频创作平台的 Agent,运行在用户自己的电脑上,",
-            "所有生成都用本机模型完成,不经过任何云端 API。",
+            "你是一个本地视频创作平台的 Agent;所有生成(视频/图片/配音)都在",
+            "用户这台电脑上用本机模型完成,你负责规划并调用平台工具。",
             "你可以写分镜脚本、排图片/配音任务、排 H3 视频渲染、查看资产。",
             "生成类工具只是排队,立即返回任务 id;告诉用户 id,别谎称已完成,",
             "用户追问进度时用 check_job/check_render 查。",
+            "任务失败时先用 inspect_failure 拿诊断上下文(报错、参数、",
+            "ComfyUI 状态),分析原因并给出具体修复步骤。",
             "先弄清需求再动手;大的创作先给方案,用户点头再排任务。",
             "只在用户明确要求记住偏好时调用 save_memory。",
             "回答用用户的语言,默认中文。",
@@ -634,12 +863,14 @@ def _message(
     *,
     tool_calls: list[dict[str, Any]] | None = None,
     tool_name: str | None = None,
+    agent: str | None = None,
 ) -> ChatMessage:
     return ChatMessage(
         role=role,
         content=content,
         tool_calls=tool_calls,
         tool_name=tool_name,
+        agent=agent,
         created_at=_now(),
     )
 

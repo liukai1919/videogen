@@ -12,6 +12,7 @@ import unicodedata
 from urllib.error import HTTPError, URLError
 import urllib.request
 
+from videogen_service.agents import AgentWorkerError, CliAgentAdapter, build_manager
 from videogen_service.comfyui import ComfyUiError, load_workflow
 from videogen_service.config import ServiceConfig
 
@@ -51,6 +52,7 @@ def run_checks(
         _check_comfyui(config, probe),
         _check_ollama(config, probe),
         _check_yt_dlp(config),
+        *_check_agents(config),
     ]
 
 
@@ -214,6 +216,34 @@ def _model_names(body: bytes | None) -> list[str]:
         for model in models
         if isinstance(model, dict) and isinstance(model.get("name"), str)
     ]
+
+
+def _check_agents(config: ServiceConfig) -> list[Check]:
+    # 外部 Agent CLI 只看装没装(shutil.which),不真的跑——启动要快,而且
+    # 没装某个 CLI 不挡本地渲染(section 9)。配置写错了才是 fail。
+    if not config.agents:
+        return []
+    try:
+        manager = build_manager(config)
+    except AgentWorkerError as error:
+        return [Check("外部 Agent", "fail", str(error))]
+    checks: list[Check] = []
+    for name in manager.registered_agents():
+        adapter = manager.adapter(name)
+        label = f"{name} CLI"
+        if not adapter.enabled:
+            checks.append(Check(label, "ok", "已在配置里停用"))
+            continue
+        executable = (
+            adapter.executable() if isinstance(adapter, CliAgentAdapter) else None
+        )
+        if executable is None:
+            checks.append(
+                Check(label, "warn", "找不到这个命令;装好再用,不影响本地渲染")
+            )
+        else:
+            checks.append(Check(label, "ok", executable))
+    return checks
 
 
 def _check_yt_dlp(config: ServiceConfig) -> Check:

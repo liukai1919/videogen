@@ -10,9 +10,16 @@ const assetsEmpty = document.getElementById("ws-assets-empty");
 const outputsGrid = document.getElementById("ws-outputs");
 const outputsHint = document.getElementById("ws-outputs-hint");
 const chatSelect = document.getElementById("ws-chat-select");
+const agentSelect = document.getElementById("ws-agent");
 const messagesBox = document.getElementById("ws-messages");
 const inputBox = document.getElementById("ws-input");
 const sendButton = document.getElementById("ws-send");
+
+const AGENT_LABELS = { claude: "Claude Code", codex: "Codex" };
+
+function agentLabel(id) {
+  return AGENT_LABELS[id] || id;
+}
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -392,6 +399,28 @@ function renderCard(render) {
 
 let sending = false;
 
+// 回答者下拉:本地大脑之外,列出 config.yaml 里配置的外部 Agent worker。
+// 没装的 CLI 照样列出来但不可选,让人知道装上就能用。
+async function loadAgents() {
+  let agents;
+  try {
+    agents = await request("/v1/agents");
+  } catch (error) {
+    return; // 没配置外部 Agent 时下拉里只有本地大脑,不算错。
+  }
+  while (agentSelect.options.length > 1) agentSelect.remove(1);
+  for (const worker of agents) {
+    const option = document.createElement("option");
+    option.value = worker.agent;
+    let label = `${agentLabel(worker.agent)}（云端大脑）`;
+    if (!worker.enabled) label = `${agentLabel(worker.agent)}（已停用）`;
+    else if (!worker.available) label = `${agentLabel(worker.agent)}（CLI 未安装）`;
+    option.textContent = label;
+    option.disabled = !worker.enabled || !worker.available;
+    agentSelect.append(option);
+  }
+}
+
 async function loadChats(selected) {
   let chats;
   try {
@@ -474,8 +503,18 @@ function messageNodes(message) {
     nodes.push(node);
     return nodes;
   }
-  // assistant: 文本气泡 + 每个工具调用一行。
-  if (message.content) nodes.push(bubble("ws-msg-assistant", message.content));
+  // assistant: 文本气泡 + 每个工具调用一行;外部 Agent 答的带署名。
+  if (message.content) {
+    const node = bubble("ws-msg-assistant", message.content);
+    if (message.agent) {
+      node.classList.add("ws-msg-external");
+      const label = document.createElement("div");
+      label.className = "ws-msg-agent-label";
+      label.textContent = `☁ ${agentLabel(message.agent)}`;
+      node.prepend(label);
+    }
+    nodes.push(node);
+  }
   for (const call of message.tool_calls || []) {
     const fn = call.function || {};
     const args =
@@ -525,17 +564,23 @@ async function sendMessage() {
     sending = true;
     sendButton.disabled = true;
     inputBox.value = "";
-    // 立即回显用户消息和思考占位,Ollama 一轮可能要几分钟。
+    const externalAgent = agentSelect.value || null;
+    // 立即回显用户消息和思考占位,一轮可能要几分钟。
     messagesBox.querySelector(":scope > .empty")?.remove();
     messagesBox.append(bubble("ws-msg-user", text));
-    const thinking = bubble("ws-msg-assistant ws-msg-thinking", "Agent 思考中…");
+    const thinking = bubble(
+      "ws-msg-assistant ws-msg-thinking",
+      externalAgent ? `${agentLabel(externalAgent)} 思考中…` : "Agent 思考中…",
+    );
     messagesBox.append(thinking);
     messagesBox.scrollTop = messagesBox.scrollHeight;
 
     const record = await request(`/v1/chats/${chatId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(
+        externalAgent ? { text, agent: externalAgent } : { text },
+      ),
     });
     renderMessages(record.messages);
     await loadChats(chatId);
@@ -566,7 +611,13 @@ inputBox.addEventListener("keydown", (event) => {
 });
 
 async function start() {
-  await Promise.all([loadProjects(), loadSkills(), loadAssets(), loadChats()]);
+  await Promise.all([
+    loadProjects(),
+    loadSkills(),
+    loadAssets(),
+    loadChats(),
+    loadAgents(),
+  ]);
   await refreshMessages();
   await loadOutputs();
 }

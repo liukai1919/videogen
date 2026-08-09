@@ -63,6 +63,30 @@ capabilities: {}
 #     timeout_seconds: 600
 #     needs_gpu: false
 
+# 外部 Agent worker(可选):把 Claude Code / Codex CLI 当云端推理层用,
+# 通过统一的 AgentManager 调用(videogen_service/agents/)。工作台对话里
+# 选中云端 Agent 后,它驱动和本地大脑相同的工具循环,能直接排任务;
+# 工具由本服务执行,CLI 保持只读沙箱。没配置时这一层不存在,平台照常
+# 只用本机模型。CLI 要自己先装好并登录(claude / codex)。
+agents: {}
+#   claude:
+#     enabled: true
+#     command: claude          # 也可以是列表,如 ["npx", "claude"]
+#     args: []                 # 追加的 CLI 参数,如 ["--allowedTools", "Edit"]
+#     timeout_seconds: 300     # 每次调用的硬超时(section: 不允许挂死)
+#     working_dir: null        # CLI 的工作目录;留空 = work/.agents/workspace
+#   codex:
+#     enabled: true
+#     command: codex
+#     args: []                 # 如 ["--sandbox", "workspace-write"] 放开写权限
+#     timeout_seconds: 300
+#     working_dir: null
+
+# 谁先上、失败了谁接手(run_with_fallback 不点名时用这条链)。
+agent_defaults:
+  primary: claude
+  fallback: ["codex"]
+
 modes:
   t2v:
     workflow_file: "./workflows/minimax_h3_t2v.json"

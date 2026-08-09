@@ -180,6 +180,8 @@ class ChatCreateRequest(StrictModel):
 
 class ChatSendRequest(StrictModel):
     text: str = Field(min_length=1, max_length=20_000)
+    # 这一轮由哪个外部 Agent worker 回答(claude/codex…);省略 = 本地大脑。
+    agent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,40}$")
 
 
 class AssetFromRenderRequest(StrictModel):
