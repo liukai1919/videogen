@@ -781,6 +781,65 @@ async function saveFrameAsset(job, slot) {
   }
 }
 
+// ---- Memory 偏好 -------------------------------------------------------------
+// 用户显式要求记住的长期偏好,住在 work/memory.json,每次起稿注入总结 Prompt。
+
+const memoryList = document.getElementById("memory-list");
+const memoryNotice = document.getElementById("memory-notice");
+const memoryText = document.getElementById("memory-text");
+
+async function loadMemory() {
+  let entries;
+  try {
+    entries = await request("/v1/memory");
+  } catch (error) {
+    return;
+  }
+  memoryList.replaceChildren();
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "draft-row";
+    const label = document.createElement("span");
+    label.textContent = entry.text;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button button-ghost draft-fill";
+    remove.textContent = "删除";
+    remove.addEventListener("click", async () => {
+      try {
+        await request(`/v1/memory/${entry.entry_id}`, { method: "DELETE" });
+        await loadMemory();
+      } catch (error) {
+        notify(memoryNotice, error.message, "error");
+      }
+    });
+    row.append(label, remove);
+    item.append(row);
+    memoryList.append(item);
+  }
+}
+
+async function addMemory() {
+  const text = memoryText.value.trim();
+  if (!text) {
+    notify(memoryNotice, "先写一条偏好", "error");
+    return;
+  }
+  try {
+    await request("/v1/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    memoryText.value = "";
+    notify(memoryNotice, "已记住，之后每次起稿都会带上", "ok");
+    await loadMemory();
+  } catch (error) {
+    notify(memoryNotice, error.message, "error");
+  }
+}
+
 // ---- 项目与 Skill -----------------------------------------------------------
 // 项目把脚本草稿和渲染归档到一起（work/.projects/），Skill 是 skills/ 里的具名
 // 创作规范。两者都是可选项：不选时页面行为和从前完全一样。
@@ -1201,6 +1260,13 @@ form.addEventListener("submit", async (event) => {
 
 sourceButton.addEventListener("click", createScript);
 document.getElementById("asset-upload").addEventListener("click", uploadAsset);
+document.getElementById("memory-add").addEventListener("click", addMemory);
+memoryText.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addMemory();
+  }
+});
 assetSelects.first.addEventListener("change", () => showAssetPreview("first"));
 assetSelects.last.addEventListener("change", () => showAssetPreview("last"));
 projectNewButton.addEventListener("click", createProject);
@@ -1307,7 +1373,7 @@ async function start() {
   refreshModeFields();
   refreshLengthHint();
   syncRatioButtons();
-  await Promise.all([loadSkills(), loadProjects(), loadAssets()]);
+  await Promise.all([loadSkills(), loadProjects(), loadAssets(), loadMemory()]);
   await refreshPipeline();
   // refreshJobs starts its own timer, and only while a job is in flight.
   await refreshJobs();

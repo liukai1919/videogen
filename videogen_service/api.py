@@ -17,8 +17,10 @@ from videogen_service.assets import (
     asset_view,
 )
 from videogen_service.config import ServiceConfig, load_config
+from videogen_service.memory import MemoryEntry, MemoryNotFound, MemoryStore
 from videogen_service.models import (
     AssetFromRenderRequest,
+    MemoryAddRequest,
     ProjectCreateRequest,
     ProjectRenderLink,
     RenderSpec,
@@ -77,8 +79,10 @@ def create_app(
     studio: ScriptStudio | None = None,
 ) -> FastAPI:
     settings = config or load_config()
+    settings.work_dir.mkdir(parents=True, exist_ok=True)
     skills = SkillLibrary(settings.skills_dir)
-    workshop = studio or ScriptStudio(settings, skills=skills)
+    memory = MemoryStore(settings.work_dir)
+    workshop = studio or ScriptStudio(settings, skills=skills, memory=memory)
     service = RenderService(
         settings, renderer or H3Renderer(settings), studio=workshop
     )
@@ -219,6 +223,26 @@ def create_app(
             return projects.link_render(project_id, request.render_id)
         except (ProjectNotFound, RenderNotFound) as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/v1/memory", response_model=list[MemoryEntry])
+    def list_memory() -> list[MemoryEntry]:
+        return memory.list()
+
+    @app.post(
+        "/v1/memory",
+        response_model=MemoryEntry,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def add_memory(request: MemoryAddRequest) -> MemoryEntry:
+        return memory.add(request.text)
+
+    @app.delete("/v1/memory/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_memory(entry_id: str) -> Response:
+        try:
+            memory.remove(entry_id)
+        except MemoryNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/v1/assets", response_model=list[AssetView])
     def list_assets() -> list[AssetView]:

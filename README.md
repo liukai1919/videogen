@@ -96,6 +96,7 @@ Copy-Item config.example.yaml config.yaml
 - `GET/POST /v1/projects`、`GET/DELETE /v1/projects/{id}`、`POST /v1/projects/{id}/renders`：项目工作区——脚本草稿和渲染的归档容器，见下文。
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
+- `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
 - `POST /v1/renders` 新增可选表单字段 `first_frame_asset`/`last_frame_asset`：用资产代替上传参考图；`videotube` 不发这两个字段，冻结契约不受影响，上传文件优先于资产。
 - `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
@@ -141,6 +142,10 @@ QUEUED → SCRIPTING（yt-dlp 取字幕 + Ollama 出脚本,自动存为项目草
 ```
 
 审阅是刻意保留的人工关卡：流水线只有提案权，批准才花显卡——和 `docs/visual-director-contract-v1.md` 的权力分离一致。批准前可以直接在提示词框里改分镜，改过的版本进渲染，存档草稿保持原样并记下 `prompt_overridden`。状态落在 `work/.projects/<id>/pipeline.json`，每个项目同时只有一条；服务重启后，脚本阶段被打断的流水线转成可重试的失败态，渲染阶段的靠渲染队列自己的恢复结果收敛。
+
+## Memory 偏好
+
+`work/memory.json` 存用户显式要求记住的长期偏好（"以后旁白都用口语"），手动或流水线起稿时作为"长期偏好"段注入 Ollama 的总结 Prompt，排在 Skill 规范和单次"额外要求"之前——所以预设和临时指示仍能压过它。只记明确要求的，条目全部可见、随时可删，没有静默学习；注入只取最近 20 条，防止挤占字幕上下文。
 
 ## 资产中心
 

@@ -226,6 +226,23 @@
                   <ul class="asset-list" id="asset-list"></ul>
                 </div>
               </details>
+
+              <details class="advanced-block" id="memory-block">
+                <summary>Memory 偏好</summary>
+                <div class="advanced-body">
+                  <p class="hint">
+                    写下长期生效的创作偏好，之后每次起稿（手动或流水线）都会自动带上。
+                    只记你明确要求的，条目全部可见、随时可删，不做静默学习。
+                  </p>
+                  <div id="memory-notice" role="status"></div>
+                  <div class="project-row">
+                    <input type="text" id="memory-text" class="field-input" maxlength="500"
+                      placeholder="例如：以后旁白都用轻松的口语，别用书面腔">
+                    <button type="button" id="memory-add" class="button button-secondary">记住</button>
+                  </div>
+                  <ol class="vg-narration" id="memory-list"></ol>
+                </div>
+              </details>
             </section>
 
             <section class="card vg-gallery-card">

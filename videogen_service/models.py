@@ -148,6 +148,10 @@ class ProjectRenderLink(StrictModel):
     render_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
+class MemoryAddRequest(StrictModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
 class AssetFromRenderRequest(StrictModel):
     """Archive a submitted render's reference frame as a reusable asset."""
 

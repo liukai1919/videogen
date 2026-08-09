@@ -25,6 +25,7 @@ from videogen_service.renderer import (
     storyboard_seconds,
     validate_storyboard,
 )
+from videogen_service.memory import MemoryStore
 from videogen_service.skills import Skill, SkillLibrary
 from videogen_service.transcript import (
     Transcript,
@@ -121,11 +122,13 @@ class ScriptStudio:
         fetcher: TranscriptFetcher | None = None,
         summarizer: Summarizer | None = None,
         skills: SkillLibrary | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         self._config = config
         self._fetcher = fetcher or YtDlpTranscriptFetcher(config.script)
         self._summarizer = summarizer or OllamaSummarizer(config)
         self._skills = skills or SkillLibrary(config.skills_dir)
+        self._memory = memory or MemoryStore(config.work_dir)
 
     def create(self, request: ScriptRequest) -> ScriptResult:
         settings = self._config.script
@@ -154,6 +157,7 @@ class ScriptStudio:
                     request=request,
                     config=self._config,
                     skill=skill,
+                    memory=self._memory.texts(),
                 )
             )
         )
@@ -242,6 +246,7 @@ def build_summary_prompt(
     request: ScriptRequest,
     config: ServiceConfig,
     skill: Skill | None = None,
+    memory: list[str] | None = None,
 ) -> str:
     settings = config.script
     renderer = config.renderer
@@ -271,6 +276,11 @@ def build_summary_prompt(
         'JSON 结构:{"title": "...", "summary": "...", "shots": '
         '[{"seconds": 6, "prompt": "...", "narration": "..."}]}',
     ]
+    if memory:
+        # Standing preferences the user explicitly saved; skill and per-run
+        # direction come later, so they can still override for one run.
+        lines += ["", "长期偏好(用户此前明确要求,持续生效):"]
+        lines += [f"- {text}" for text in memory]
     if skill is not None and skill.instructions:
         # The user's 额外要求 comes after these, so ad-hoc direction can still
         # override a preset for one run.
