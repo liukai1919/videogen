@@ -1165,11 +1165,17 @@ function fillFromScript(script) {
 
   sourceTitle.textContent = script.title;
   const source = script.source;
-  const kind = source.automatic_captions ? "自动字幕" : "人工字幕";
-  sourceMeta.textContent =
-    `${source.title} · ${kind}（${source.subtitle_language}）· ` +
-    `原片 ${Math.round(source.duration_seconds / 60)} 分钟 · ` +
-    `字幕 ${source.transcript_chars} 字${source.transcript_truncated ? "（已截断）" : ""}`;
+  if (source.kind === "document") {
+    sourceMeta.textContent =
+      `${source.filename} · 本地文档 ${source.chars} 字` +
+      `${source.truncated ? "（已截断）" : ""}`;
+  } else {
+    const kind = source.automatic_captions ? "自动字幕" : "人工字幕";
+    sourceMeta.textContent =
+      `${source.title} · ${kind}（${source.subtitle_language}）· ` +
+      `原片 ${Math.round(source.duration_seconds / 60)} 分钟 · ` +
+      `字幕 ${source.transcript_chars} 字${source.transcript_truncated ? "（已截断）" : ""}`;
+  }
   sourceSummary.textContent = script.summary;
 
   narrationList.replaceChildren();
@@ -1218,6 +1224,41 @@ async function createScript() {
   }
 }
 
+// ---- 本地文档 → 分镜脚本 ------------------------------------------------------
+
+async function createScriptFromDocument() {
+  const input = document.getElementById("source-doc");
+  const file = input.files && input.files[0];
+  if (!file) {
+    notify(sourceNotice, "先选一个 PDF / Word / 文本文件", "error");
+    return;
+  }
+  const docButton = document.getElementById("source-doc-button");
+  docButton.disabled = true;
+  notify(sourceNotice, "正在本机解析文档并总结，通常要一两分钟…", "");
+  try {
+    const body = new FormData();
+    body.set("file", file);
+    if (Number(sourceTarget.value)) body.set("target_seconds", sourceTarget.value);
+    if (Number(sourceMaxShots.value)) body.set("max_shots", sourceMaxShots.value);
+    if (sourceGuidance.value.trim()) body.set("guidance", sourceGuidance.value.trim());
+    if (sourceSkill.value) body.set("skill", sourceSkill.value);
+    if (projectSelect.value) body.set("project_id", projectSelect.value);
+    const script = await request("/v1/scripts/document", { method: "POST", body });
+    fillFromScript(script);
+    notify(sourceNotice, "分镜已填进下面的提示词，改完再点生成", "ok");
+    if (window.AppUI) AppUI.showToast("分镜脚本已生成", "success");
+    if (projectSelect.value) {
+      await loadProjects(projectSelect.value);
+      await refreshDrafts();
+    }
+  } catch (error) {
+    notify(sourceNotice, error.message, "error");
+  } finally {
+    docButton.disabled = false;
+  }
+}
+
 // ---- 提交渲染 ---------------------------------------------------------------
 
 form.addEventListener("submit", async (event) => {
@@ -1259,6 +1300,22 @@ form.addEventListener("submit", async (event) => {
 });
 
 sourceButton.addEventListener("click", createScript);
+document
+  .getElementById("source-doc-button")
+  .addEventListener("click", createScriptFromDocument);
+document.getElementById("project-export").addEventListener("click", () => {
+  const projectId = projectSelect.value;
+  if (!projectId) {
+    notify(composeNotice, "先选一个项目再导出", "error");
+    return;
+  }
+  // zip 里是成片 MP4、每稿的分镜文本和按渲染时间轴对齐的 SRT 字幕,
+  // 剪映/DaVinci/Premiere 都能直接吃。
+  const anchor = document.createElement("a");
+  anchor.href = `/v1/projects/${projectId}/export`;
+  anchor.download = "";
+  anchor.click();
+});
 document.getElementById("asset-upload").addEventListener("click", uploadAsset);
 document.getElementById("memory-add").addEventListener("click", addMemory);
 memoryText.addEventListener("keydown", (event) => {

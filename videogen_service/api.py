@@ -6,7 +6,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import ValidationError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from videogen_service.assets import (
     MEDIA_TYPES,
@@ -17,6 +17,8 @@ from videogen_service.assets import (
     asset_view,
 )
 from videogen_service.config import ServiceConfig, load_config
+from videogen_service.documents import DocumentError, extract_text
+from videogen_service.export import build_project_export
 from videogen_service.memory import MemoryEntry, MemoryNotFound, MemoryStore
 from videogen_service.models import (
     AssetFromRenderRequest,
@@ -24,6 +26,7 @@ from videogen_service.models import (
     ProjectCreateRequest,
     ProjectRenderLink,
     RenderSpec,
+    ScriptOptions,
     RenderSummary,
     RenderValidation,
     RenderValidationRequest,
@@ -55,6 +58,7 @@ from videogen_service.skills import SkillLibrary
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
+_MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 _STATIC_DIR = Path(__file__).parent / "static"
 _STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -223,6 +227,84 @@ def create_app(
             return projects.link_render(project_id, request.render_id)
         except (ProjectNotFound, RenderNotFound) as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/v1/scripts/document", response_model=ScriptResult)
+    async def script_from_document(
+        file: UploadFile = File(...),
+        target_seconds: float | None = Form(None),
+        shot_seconds: float | None = Form(None),
+        max_shots: int | None = Form(None),
+        guidance: str | None = Form(None),
+        style: str | None = Form(None),
+        output_language: str | None = Form(None),
+        skill: str | None = Form(None),
+        project_id: str | None = Form(None),
+    ) -> ScriptResult:
+        # 本地文档(PDF/Word/文本)起稿:抽文本在本机完成,之后走和 YouTube
+        # 字幕完全相同的 Ollama 总结路径。
+        payload: dict[str, object] = {}
+        for key, value in (
+            ("target_seconds", target_seconds),
+            ("shot_seconds", shot_seconds),
+            ("max_shots", max_shots),
+            ("guidance", guidance),
+            ("style", style),
+            ("output_language", output_language),
+            ("skill", skill),
+            ("project_id", project_id),
+        ):
+            if value is not None and str(value).strip():
+                payload[key] = value
+        try:
+            options = ScriptOptions.model_validate(payload)
+        except ValidationError as error:
+            raise HTTPException(status_code=422, detail=error.errors()) from error
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="需要一个文档文件")
+        data = await file.read(_MAX_DOCUMENT_BYTES + 1)
+        if len(data) > _MAX_DOCUMENT_BYTES:
+            raise HTTPException(status_code=413, detail="文档不能超过 20MB")
+        filename = Path(file.filename).name
+        try:
+            text = extract_text(filename, data)
+            if options.project_id is not None:
+                projects.get(options.project_id)
+            result = workshop.create_from_document(
+                options, filename=filename, text=text
+            )
+            if options.project_id is not None:
+                projects.add_draft(
+                    options.project_id, request=options, result=result
+                )
+            return result
+        except DocumentError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ScriptUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except (ScriptError, RenderError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/projects/{project_id}/export")
+    def export_project(project_id: str) -> Response:
+        try:
+            project = projects.get(project_id)
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        filename, payload = build_project_export(
+            project, config=settings, renders=service
+        )
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename*=UTF-8''{quote(filename)}"
+                ),
+                "Cache-Control": "no-cache",
+            },
+        )
 
     @app.get("/v1/memory", response_model=list[MemoryEntry])
     def list_memory() -> list[MemoryEntry]:

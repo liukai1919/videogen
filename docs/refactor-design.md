@@ -85,12 +85,14 @@ render 的参考帧可以"存为资产"（`POST /v1/assets/from-render`），新
 `/v1/memory` 增删查；起稿时注入总结 Prompt 的"长期偏好"段（只取最近 20 条），
 优先级低于 Skill 与单次 guidance。不做静默学习，条目全部可见可删。
 
-### 阶段五：本地工作流
+### 阶段五（已实现）：本地工作流
 
-- 摄取：PDF/Word/纯文本作为调研来源（`/v1/scripts` 的输入从"仅 YouTube URL"
-  扩展为可上传文档）；
-- 导出：项目打包（成片 MP4 + narration 生成的 SRT + 分镜元数据 JSON），
-  之后再评估剪映草稿 / EDL 格式。
+- 摄取：`videogen_service/documents.py` 本机抽取 PDF（pypdf）/Word
+  （python-docx）/纯文本，`POST /v1/scripts/document` 走与字幕相同的总结路径；
+  `ScriptResult.source` 变为 `kind` 区分的 youtube/document 联合。
+- 导出：`videogen_service/export.py`，`GET /v1/projects/{id}/export` 打包
+  成片 MP4 + 分镜文本 + 解说词 + 按渲染时间轴对齐的 SRT + 清单;
+  剪映草稿 / EDL 等专有格式留作后续,不改变归档内容。
 
 ### 刻意不做
 

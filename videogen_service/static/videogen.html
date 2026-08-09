@@ -51,6 +51,7 @@
                     <option value="">不关联项目</option>
                   </select>
                   <button type="button" id="project-new" class="button button-secondary">新建</button>
+                  <button type="button" id="project-export" class="button button-secondary">导出</button>
                 </div>
                 <div class="vg-source-result" id="pipeline-panel" hidden>
                   <strong>自动流水线（本机执行：yt-dlp → Ollama → 审阅 → ComfyUI）</strong>
@@ -100,6 +101,13 @@
                   <div id="source-notice" role="status"></div>
                   <button type="button" id="source-button" class="button button-secondary button-block">
                     取字幕并生成分镜
+                  </button>
+                  <label class="field">
+                    <span class="field-label">或用本地文档起稿（PDF / Word / 文本，本机解析）</span>
+                    <input type="file" id="source-doc" class="field-input" accept=".pdf,.docx,.txt,.md">
+                  </label>
+                  <button type="button" id="source-doc-button" class="button button-secondary button-block">
+                    读文档并生成分镜
                   </button>
                   <div class="vg-source-result" id="source-result" hidden>
                     <strong id="source-title"></strong>

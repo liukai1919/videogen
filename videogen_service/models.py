@@ -93,8 +93,9 @@ class RenderSummary(StrictModel):
     elapsed_seconds: float | None = None
 
 
-class ScriptRequest(StrictModel):
-    url: str = Field(min_length=1, max_length=2_048)
+class ScriptOptions(StrictModel):
+    """The storyboard knobs shared by every script source (YouTube, 文档)."""
+
     target_seconds: float | None = Field(default=None, gt=0)
     shot_seconds: float | None = Field(default=None, gt=0)
     max_shots: int | None = Field(default=None, gt=0)
@@ -109,6 +110,10 @@ class ScriptRequest(StrictModel):
     project_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
+class ScriptRequest(ScriptOptions):
+    url: str = Field(min_length=1, max_length=2_048)
+
+
 class ScriptShot(StrictModel):
     seconds: float = Field(gt=0)
     prompt: str = Field(min_length=1)
@@ -116,6 +121,9 @@ class ScriptShot(StrictModel):
 
 
 class ScriptSource(StrictModel):
+    # Discriminator with a default, so records written before document sources
+    # existed still parse as the YouTube shape they always were.
+    kind: Literal["youtube"] = "youtube"
     video_id: str
     title: str
     url: str
@@ -126,8 +134,17 @@ class ScriptSource(StrictModel):
     transcript_truncated: bool
 
 
+class DocumentSource(StrictModel):
+    """A local file (PDF/Word/纯文本) whose text seeded the storyboard."""
+
+    kind: Literal["document"] = "document"
+    filename: str
+    chars: int
+    truncated: bool
+
+
 class ScriptResult(StrictModel):
-    source: ScriptSource
+    source: ScriptSource | DocumentSource = Field(discriminator="kind")
     title: str
     summary: str
     mode: RenderMode

@@ -6,7 +6,8 @@
 
 import json
 import logging
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 import urllib.request
 
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from videogen_service.config import RenderMode, ServiceConfig
 from videogen_service.models import (
+    DocumentSource,
+    ScriptOptions,
     ScriptRequest,
     ScriptResult,
     ScriptShot,
@@ -37,6 +40,7 @@ from videogen_service.transcript import (
 
 _LOGGER = logging.getLogger("videogen_service.scripting")
 _TRUNCATION_NOTE = "\n[字幕过长,后面的部分已截断]"
+_ScriptOptionsT = TypeVar("_ScriptOptionsT", bound=ScriptOptions)
 
 
 class ScriptError(RuntimeError):
@@ -134,12 +138,7 @@ class ScriptStudio:
         settings = self._config.script
         if not settings.enabled:
             raise ScriptError("本服务没有开启字幕总结功能(script.enabled)")
-        skill: Skill | None = None
-        if request.skill is not None:
-            skill = self._skills.get(request.skill)
-            if skill is None:
-                raise ScriptError(f"Skill「{request.skill}」不存在或加载失败")
-            request = _apply_skill(request, skill)
+        request, skill = self._resolve_skill(request)
         try:
             transcript = self._fetcher.fetch(request.url)
         except TranscriptUnavailable as error:
@@ -195,6 +194,62 @@ class ScriptStudio:
             shots=shots,
         )
 
+    def create_from_document(
+        self, options: ScriptOptions, *, filename: str, text: str
+    ) -> ScriptResult:
+        """Same storyboard pipeline, seeded by a local file instead of
+        captions: the text was already extracted on this machine."""
+        settings = self._config.script
+        if not settings.enabled:
+            raise ScriptError("本服务没有开启字幕总结功能(script.enabled)")
+        options, skill = self._resolve_skill(options)
+        if not text.strip():
+            raise ScriptError("文档里没有可用的文字")
+        clipped, truncated = _clip(text, settings.max_transcript_chars)
+        title = Path(filename).stem or filename
+        draft = _parse_draft(
+            self._summarizer.summarize(
+                build_document_prompt(
+                    title,
+                    text=clipped,
+                    truncated=truncated,
+                    request=options,
+                    config=self._config,
+                    skill=skill,
+                    memory=self._memory.texts(),
+                )
+            )
+        )
+        shots = _fit_shots(draft.shots, request=options, config=self._config)
+        preamble = _preamble(
+            title=draft.title or title, style=options.style or settings.style
+        )
+        prompt = storyboard_text(shots, preamble=preamble)
+        board = parse_storyboard(prompt, default_seconds=settings.shot_seconds)
+        validate_storyboard(board, config=self._config)
+        _LOGGER.info("已从文档 %s 生成 %d 段分镜", filename, len(shots))
+        return ScriptResult(
+            source=DocumentSource(
+                filename=filename, chars=len(clipped), truncated=truncated
+            ),
+            title=draft.title or title,
+            summary=draft.summary,
+            mode=_script_mode(self._config),
+            prompt=prompt,
+            seconds=storyboard_seconds(board, fps=self._config.renderer.fps),
+            shots=shots,
+        )
+
+    def _resolve_skill(
+        self, options: _ScriptOptionsT
+    ) -> tuple[_ScriptOptionsT, Skill | None]:
+        if options.skill is None:
+            return options, None
+        skill = self._skills.get(options.skill)
+        if skill is None:
+            raise ScriptError(f"Skill「{options.skill}」不存在或加载失败")
+        return _apply_skill(options, skill), skill
+
 
 def _script_mode(config: ServiceConfig) -> RenderMode:
     if "story" in config.modes:
@@ -212,7 +267,7 @@ def _preamble(*, title: str, style: str) -> str:
     return f"科普短片《{title}》。统一风格:{style}。"
 
 
-def _apply_skill(request: ScriptRequest, skill: Skill) -> ScriptRequest:
+def _apply_skill(request: _ScriptOptionsT, skill: Skill) -> _ScriptOptionsT:
     """Fill request fields the caller left unset from the skill's defaults.
 
     Explicit request values always win; the skill only supplies what is
@@ -243,10 +298,60 @@ def build_summary_prompt(
     *,
     text: str,
     truncated: bool,
-    request: ScriptRequest,
+    request: ScriptOptions,
     config: ServiceConfig,
     skill: Skill | None = None,
     memory: list[str] | None = None,
+) -> str:
+    intro = [
+        f"你是科普短视频的编剧。下面是 YouTube 视频《{transcript.title}》的字幕",
+        "(可能是机器自动听写的,会有错别字和口语,请按语义理解)。",
+    ]
+    return _compose_summary_prompt(
+        intro,
+        source_label="字幕",
+        text=text,
+        truncated=truncated,
+        request=request,
+        config=config,
+        skill=skill,
+        memory=memory,
+    )
+
+
+def build_document_prompt(
+    title: str,
+    *,
+    text: str,
+    truncated: bool,
+    request: ScriptOptions,
+    config: ServiceConfig,
+    skill: Skill | None = None,
+    memory: list[str] | None = None,
+) -> str:
+    intro = [f"你是科普短视频的编剧。下面是本地资料文档《{title}》的内容。"]
+    return _compose_summary_prompt(
+        intro,
+        source_label="文档",
+        text=text,
+        truncated=truncated,
+        request=request,
+        config=config,
+        skill=skill,
+        memory=memory,
+    )
+
+
+def _compose_summary_prompt(
+    intro: list[str],
+    *,
+    source_label: str,
+    text: str,
+    truncated: bool,
+    request: ScriptOptions,
+    config: ServiceConfig,
+    skill: Skill | None,
+    memory: list[str] | None,
 ) -> str:
     settings = config.script
     renderer = config.renderer
@@ -255,8 +360,7 @@ def build_summary_prompt(
     target_seconds = request.target_seconds or settings.target_seconds
     wanted = max(1, min(max_shots, round(target_seconds / shot_seconds)))
     lines = [
-        f"你是科普短视频的编剧。下面是 YouTube 视频《{transcript.title}》的字幕",
-        "(可能是机器自动听写的,会有错别字和口语,请按语义理解)。",
+        *intro,
         f"请把它改写成一条 {target_seconds:g} 秒左右的原创科普短片脚本。",
         "",
         "要求:",
@@ -270,7 +374,7 @@ def build_summary_prompt(
         "   光线、氛围,一句到两句,不要写字幕、文字、水印、台标或真实人物姓名。",
         "7. 每个分镜的 narration 是这一镜的解说词,一到两句;所有 narration 连起来",
         "   要能独立讲清楚原理,不能只是复述画面。",
-        "8. 内容要重新组织和表达,不要整句照抄原字幕。",
+        f"8. 内容要重新组织和表达,不要整句照抄原{source_label}。",
         "9. 只输出 JSON,不要解释,不要代码块。",
         "",
         'JSON 结构:{"title": "...", "summary": "...", "shots": '
@@ -280,7 +384,7 @@ def build_summary_prompt(
         # Standing preferences the user explicitly saved; skill and per-run
         # direction come later, so they can still override for one run.
         lines += ["", "长期偏好(用户此前明确要求,持续生效):"]
-        lines += [f"- {text}" for text in memory]
+        lines += [f"- {entry}" for entry in memory]
     if skill is not None and skill.instructions:
         # The user's 额外要求 comes after these, so ad-hoc direction can still
         # override a preset for one run.
@@ -292,8 +396,8 @@ def build_summary_prompt(
     if request.guidance:
         lines += ["", f"额外要求:{request.guidance}"]
     if truncated:
-        lines += ["", "注意:字幕已被截断,请根据现有部分完成脚本。"]
-    lines += ["", "字幕原文:", "<<<", text, ">>>"]
+        lines += ["", f"注意:{source_label}已被截断,请根据现有部分完成脚本。"]
+    lines += ["", f"{source_label}原文:", "<<<", text, ">>>"]
     return "\n".join(lines)
 
 
@@ -327,7 +431,7 @@ def _json_object(response: str) -> dict[str, Any]:
 
 
 def _fit_shots(
-    drafts: list[_DraftShot], *, request: ScriptRequest, config: ServiceConfig
+    drafts: list[_DraftShot], *, request: ScriptOptions, config: ServiceConfig
 ) -> list[ScriptShot]:
     """Clamp a model's shot list onto the renderer's real limits."""
     settings = config.script

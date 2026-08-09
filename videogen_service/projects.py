@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from videogen_service.artifacts import write_json_atomic
-from videogen_service.models import ScriptRequest, ScriptResult
+from videogen_service.models import ScriptOptions, ScriptRequest, ScriptResult
 
 # Same shape as render ids. The store itself lives under ".projects", which can
 # never collide with a render directory because a dot is not a legal id char.
@@ -40,11 +40,16 @@ class StrictModel(BaseModel):
 
 
 class ProjectDraft(StrictModel):
-    """One archived script run: what was asked and what came back."""
+    """One archived script run: what was asked and what came back.
+
+    The request is a ScriptRequest for YouTube runs and bare ScriptOptions for
+    document runs; extra="forbid" keeps the union unambiguous (only the former
+    carries url).
+    """
 
     draft_id: int = Field(ge=1)
     created_at: str
-    request: ScriptRequest
+    request: ScriptRequest | ScriptOptions
     result: ScriptResult
 
 
@@ -123,7 +128,11 @@ class ProjectStore:
             shutil.rmtree(directory)
 
     def add_draft(
-        self, project_id: str, *, request: ScriptRequest, result: ScriptResult
+        self,
+        project_id: str,
+        *,
+        request: ScriptRequest | ScriptOptions,
+        result: ScriptResult,
     ) -> ProjectDraft:
         with self._lock:
             record = self._load(project_id)

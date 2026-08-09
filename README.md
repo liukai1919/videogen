@@ -97,6 +97,8 @@ Copy-Item config.example.yaml config.yaml
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
 - `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
+- `POST /v1/scripts/document`：上传本地 PDF/Word/文本，本机抽文本后走同一条 Ollama 总结路径生成分镜。
+- `GET /v1/projects/{id}/export`：项目打包下载——成片 MP4、每稿分镜文本与解说词、按渲染时间轴对齐的 SRT、元数据清单。
 - `POST /v1/renders` 新增可选表单字段 `first_frame_asset`/`last_frame_asset`：用资产代替上传参考图；`videotube` 不发这两个字段，冻结契约不受影响，上传文件优先于资产。
 - `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
@@ -142,6 +144,12 @@ QUEUED → SCRIPTING（yt-dlp 取字幕 + Ollama 出脚本,自动存为项目草
 ```
 
 审阅是刻意保留的人工关卡：流水线只有提案权，批准才花显卡——和 `docs/visual-director-contract-v1.md` 的权力分离一致。批准前可以直接在提示词框里改分镜，改过的版本进渲染，存档草稿保持原样并记下 `prompt_overridden`。状态落在 `work/.projects/<id>/pipeline.json`，每个项目同时只有一条；服务重启后，脚本阶段被打断的流水线转成可重试的失败态，渲染阶段的靠渲染队列自己的恢复结果收敛。
+
+## 本地文档与导出
+
+调研入口不再只有 YouTube：`POST /v1/scripts/document` 接本地 PDF、Word（.docx）、纯文本和 Markdown，pypdf / python-docx 在本机抽文本，之后与字幕走完全相同的总结路径（Skill、Memory、guidance 都生效），结果同样可存为项目草稿。扫描件 PDF 提取不到文字会明确报错。
+
+出口是项目打包：`GET /v1/projects/{id}/export` 下载一个 zip——`renders/` 里是完成的 MP4，`drafts/draft-NN/` 里是分镜文本、解说词和 `narration.srt`（字幕时间按 H3 帧对齐后的真实渲染时长计算），`project.json` 是清单。MP4+SRT 是剪映 / DaVinci / Premiere 都直接吃的通用格式；未完成的渲染记为 skipped，不挡导出。
 
 ## Memory 偏好
 
