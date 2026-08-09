@@ -43,6 +43,26 @@ script:
   cookies_file: null
   proxy: null
 
+# 平台能力注册表:除 H3 视频(modes)之外的本地生成能力,提交走 POST /v1/jobs。
+# 全部在本机执行,不经过任何云端 API。按需取消注释并改成你机器上的真实配置。
+capabilities: {}
+#   flux-t2i:
+#     kind: t2i
+#     workflow_file: "./workflows/flux_t2i.json"   # ComfyUI Export (API) 格式
+#     inputs:
+#       prompt: ["6.text"]
+#       width: ["5.width"]
+#       height: ["5.height"]
+#       seed: ["25.noise_seed"]
+#     needs_gpu: true    # 和 H3 渲染共享同一张卡,轮流进 GPU
+#   local-tts:
+#     kind: tts
+#     # 本地命令模板,{text_file} 是解说词文本,{output_file} 是产出音频。
+#     command: ["python", "tts.py", "--input", "{text_file}", "--output", "{output_file}"]
+#     output_suffix: ".wav"
+#     timeout_seconds: 600
+#     needs_gpu: false
+
 modes:
   t2v:
     workflow_file: "./workflows/minimax_h3_t2v.json"

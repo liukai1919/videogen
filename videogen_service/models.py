@@ -169,6 +169,11 @@ class MemoryAddRequest(StrictModel):
     text: str = Field(min_length=1, max_length=500)
 
 
+class JobSaveAssetRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    category: str = Field(default="生成图", max_length=40)
+
+
 class AssetFromRenderRequest(StrictModel):
     """Archive a submitted render's reference frame as a reusable asset."""
 

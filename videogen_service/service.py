@@ -52,10 +52,16 @@ class RenderService:
         renderer: Renderer,
         *,
         studio: ScriptStudio | None = None,
+        # threading.Lock is a factory, not a class, so the annotation must stay
+        # a string to avoid evaluating Lock | None at runtime.
+        gpu_gate: "Lock | None" = None,
     ) -> None:
         self._config = config
         self._renderer = renderer
         self._studio = studio or ScriptStudio(config)
+        # One card, many workers: the render queue and the generation-job queue
+        # (jobs.py) take turns through this shared gate.
+        self._gpu_gate = gpu_gate or Lock()
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
@@ -308,7 +314,8 @@ class RenderService:
                     ),
                 )
 
-            output = self._renderer.render(request, on_progress=report)
+            with self._gpu_gate:
+                output = self._renderer.render(request, on_progress=report)
             write_bytes_atomic(self._render_dir(render_id) / "output.mp4", output)
             self._change(
                 render_id,

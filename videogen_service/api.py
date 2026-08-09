@@ -1,6 +1,7 @@
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
@@ -19,9 +20,20 @@ from videogen_service.assets import (
 from videogen_service.config import ServiceConfig, load_config
 from videogen_service.documents import DocumentError, extract_text
 from videogen_service.export import build_project_export
+from videogen_service.jobs import (
+    JOB_MEDIA_TYPES,
+    JobConflict,
+    JobError,
+    JobNotFound,
+    JobRunner,
+    JobService,
+    JobSpec,
+    JobView,
+)
 from videogen_service.memory import MemoryEntry, MemoryNotFound, MemoryStore
 from videogen_service.models import (
     AssetFromRenderRequest,
+    JobSaveAssetRequest,
     MemoryAddRequest,
     ProjectCreateRequest,
     ProjectRenderLink,
@@ -81,20 +93,26 @@ def create_app(
     *,
     renderer: Renderer | None = None,
     studio: ScriptStudio | None = None,
+    job_runner: JobRunner | None = None,
 ) -> FastAPI:
     settings = config or load_config()
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     skills = SkillLibrary(settings.skills_dir)
     memory = MemoryStore(settings.work_dir)
     workshop = studio or ScriptStudio(settings, skills=skills, memory=memory)
+    gpu_gate = Lock()
     service = RenderService(
-        settings, renderer or H3Renderer(settings), studio=workshop
+        settings,
+        renderer or H3Renderer(settings),
+        studio=workshop,
+        gpu_gate=gpu_gate,
     )
     projects = ProjectStore(settings.work_dir)
     assets = AssetStore(settings.work_dir)
     pipeline = PipelineService(
         settings, renders=service, projects=projects, studio=workshop
     )
+    jobs = JobService(settings, runner=job_runner, gpu_gate=gpu_gate)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -103,6 +121,7 @@ def create_app(
         finally:
             # The pipeline submits renders, so it stops taking work first.
             pipeline.close()
+            jobs.close()
             service.close()
 
     app = FastAPI(title="VideoTube Videogen", version="0.1.0", lifespan=lifespan)
@@ -305,6 +324,121 @@ def create_app(
                 "Cache-Control": "no-cache",
             },
         )
+
+    @app.get("/v1/capabilities")
+    def list_capabilities() -> list[dict[str, object]]:
+        """The platform's catalog: what this machine can generate and where to
+        submit it. H3 video modes ride the frozen render seam; everything else
+        goes through /v1/jobs."""
+        catalog: list[dict[str, object]] = [
+            {
+                "capability_id": mode,
+                "kind": mode,
+                "output": "video",
+                "submit_via": "renders",
+                "needs_gpu": True,
+            }
+            for mode in sorted(settings.modes)
+        ]
+        catalog += [
+            {
+                "capability_id": capability_id,
+                "kind": capability.kind,
+                "output": "image" if capability.kind == "t2i" else "audio",
+                "submit_via": "jobs",
+                "needs_gpu": capability.needs_gpu,
+            }
+            for capability_id, capability in sorted(
+                settings.capabilities.items()
+            )
+        ]
+        return catalog
+
+    @app.post(
+        "/v1/jobs", response_model=JobView, status_code=status.HTTP_202_ACCEPTED
+    )
+    def submit_job(spec: JobSpec) -> JobView:
+        try:
+            return jobs.submit(spec)
+        except JobConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except JobError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/jobs", response_model=list[JobView])
+    def list_jobs() -> list[JobView]:
+        return jobs.list()
+
+    @app.get("/v1/jobs/{job_id}", response_model=JobView)
+    def get_job(job_id: str) -> JobView:
+        try:
+            return jobs.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.api_route(
+        "/v1/jobs/{job_id}/media", methods=["GET", "HEAD"], name="job_media"
+    )
+    def job_media(job_id: str) -> FileResponse:
+        try:
+            path = jobs.media_path(job_id)
+        except JobNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return FileResponse(
+            path,
+            media_type=JOB_MEDIA_TYPES.get(
+                path.suffix.lower(), "application/octet-stream"
+            ),
+            filename=f"{job_id}{path.suffix}",
+            content_disposition_type="inline",
+            headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post(
+        "/v1/jobs/{job_id}/retry",
+        response_model=JobView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def retry_job(job_id: str) -> JobView:
+        try:
+            return jobs.retry(job_id)
+        except JobNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except JobConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.delete("/v1/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_job(job_id: str) -> Response:
+        try:
+            jobs.delete(job_id)
+        except JobNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except JobConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/v1/jobs/{job_id}/save-asset",
+        response_model=AssetView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def save_job_asset(job_id: str, request: JobSaveAssetRequest) -> AssetView:
+        """Archives a finished image job's output into the asset center."""
+        try:
+            path = jobs.media_path(job_id)
+        except JobNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        try:
+            return asset_view(
+                assets.create(
+                    name=request.name,
+                    category=request.category,
+                    filename=path.name,
+                    data=path.read_bytes(),
+                )
+            )
+        except (AssetError, OSError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/v1/memory", response_model=list[MemoryEntry])
     def list_memory() -> list[MemoryEntry]:

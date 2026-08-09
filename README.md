@@ -1,6 +1,8 @@
 # VideoTube Videogen
 
-VideoTube Studio 的独立本地渲染服务。它拥有 MiniMax H3、ComfyUI workflow、参考帧副本、渲染进度和渲染产物；原来的 `videotube` 项目继续拥有自动化流水线、用户任务、预览副本和 B 站投稿；视频生成台这一页已经搬到本项目。
+正在从单一渲染服务重构为**本地通用视频生成平台**（Agent 编排本机模型：Ollama 写脚本、ComfyUI 出图、H3 出视频、本地 TTS 配音、FFmpeg 合成，全程不依赖云端 API），路线见 `docs/refactor-design.md` 的 v2 部分。当前已就位：能力注册表与通用任务队列（`/v1/capabilities`、`/v1/jobs`，图片/音频与 H3 视频共享同一 GPU 闸门轮流上卡）、项目工作区、Skill、流水线、资产中心、Memory、文档导入与成片导出。
+
+它同时仍是 VideoTube Studio 的独立本地渲染服务。它拥有 MiniMax H3、ComfyUI workflow、参考帧副本、渲染进度和渲染产物；原来的 `videotube` 项目继续拥有自动化流水线、用户任务、预览副本和 B 站投稿；视频生成台这一页已经搬到本项目。
 
 ```text
 浏览器 → 本服务:8020 → ComfyUI:8188
@@ -97,6 +99,8 @@ Copy-Item config.example.yaml config.yaml
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
 - `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
+- `GET /v1/capabilities`：平台能力目录——H3 视频各模式（提交走 `/v1/renders`）加上 config `capabilities` 里声明的本地能力（文生图、TTS，提交走 `/v1/jobs`）。
+- `POST/GET /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs/{id}/media`、`POST /v1/jobs/{id}/retry`、`DELETE /v1/jobs/{id}`、`POST /v1/jobs/{id}/save-asset`：通用生成任务队列。t2i 走 ComfyUI workflow（和渲染同一套节点指针机制），tts 走 config 里的本地命令模板；`needs_gpu` 的任务和 H3 渲染共享一把 GPU 锁轮流上卡，图片产物可一键存进资产中心。
 - `POST /v1/scripts/document`：上传本地 PDF/Word/文本，本机抽文本后走同一条 Ollama 总结路径生成分镜。
 - `GET /v1/projects/{id}/export`：项目打包下载——成片 MP4、每稿分镜文本与解说词、按渲染时间轴对齐的 SRT、元数据清单。
 - `POST /v1/renders` 新增可选表单字段 `first_frame_asset`/`last_frame_asset`：用资产代替上传参考图；`videotube` 不发这两个字段，冻结契约不受影响，上传文件优先于资产。

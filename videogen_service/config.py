@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -63,6 +64,57 @@ class ScriptConfig(StrictModel):
     proxy: str | None = None
 
 
+class ComfyCapability(StrictModel):
+    """A ComfyUI-backed generation capability, e.g. FLUX 文生图."""
+
+    kind: Literal["t2i"]
+    workflow_file: Path
+    # Same "<node_id>.<field>" pointers the render modes use.
+    inputs: dict[str, list[str]]
+    needs_gpu: bool = True
+
+    @model_validator(mode="after")
+    def validate_inputs(self) -> "ComfyCapability":
+        if "prompt" not in self.inputs:
+            raise ValueError("t2i capability inputs must include prompt")
+        unknown = set(self.inputs) - {
+            "prompt",
+            "negative_prompt",
+            "width",
+            "height",
+            "seed",
+        }
+        if unknown:
+            raise ValueError(f"unknown capability inputs: {sorted(unknown)}")
+        return self
+
+
+class CommandCapability(StrictModel):
+    """A local-command capability, e.g. TTS 配音. The command template runs on
+    this machine with {text_file} and {output_file} substituted; no cloud API
+    is ever involved."""
+
+    kind: Literal["tts"]
+    command: list[str] = Field(min_length=1)
+    output_suffix: str = ".wav"
+    timeout_seconds: float = Field(default=600, gt=0)
+    needs_gpu: bool = False
+
+    @model_validator(mode="after")
+    def validate_command(self) -> "CommandCapability":
+        joined = " ".join(self.command)
+        if "{text_file}" not in joined or "{output_file}" not in joined:
+            raise ValueError(
+                "tts capability command must reference {text_file} and {output_file}"
+            )
+        if not self.output_suffix.startswith("."):
+            raise ValueError("output_suffix must start with a dot")
+        return self
+
+
+Capability = ComfyCapability | CommandCapability
+
+
 class ModeConfig(StrictModel):
     workflow_file: Path
     inputs: dict[str, list[str]]
@@ -91,6 +143,8 @@ class ServiceConfig(StrictModel):
     ollama: OllamaConfig
     script: ScriptConfig = Field(default_factory=ScriptConfig)
     modes: dict[RenderMode, ModeConfig]
+    # 平台能力注册表:除 H3 视频(modes)之外的本地生成能力(文生图、TTS…)。
+    capabilities: dict[str, Capability] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_modes(self) -> "ServiceConfig":
@@ -98,6 +152,11 @@ class ServiceConfig(StrictModel):
             raise ValueError("unauthenticated videogen service must listen on loopback")
         if not self.modes:
             raise ValueError("at least one render mode is required")
+        for capability_id in self.capabilities:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", capability_id):
+                raise ValueError(
+                    f"capability id 只能是字母数字下划线连字符: {capability_id}"
+                )
         # A generated storyboard is submitted through the same /v1/renders seam
         # as a hand-written one, so it has to fit the renderer's own limits.
         if self.script.max_shots > self.renderer.max_shots:
@@ -132,12 +191,24 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
         script = script.model_copy(
             update={"cookies_file": _resolve_path(base_dir, script.cookies_file)}
         )
+    capabilities: dict[str, Capability] = {}
+    for capability_id, capability in config.capabilities.items():
+        if isinstance(capability, ComfyCapability):
+            capability = capability.model_copy(
+                update={
+                    "workflow_file": _resolve_path(
+                        base_dir, capability.workflow_file
+                    )
+                }
+            )
+        capabilities[capability_id] = capability
     return config.model_copy(
         update={
             "work_dir": work_dir,
             "skills_dir": skills_dir,
             "modes": modes,
             "script": script,
+            "capabilities": capabilities,
         }
     )
 
