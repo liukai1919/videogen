@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 from videogen_service.config import ServiceConfig, load_config
 from videogen_service.models import (
+    ProjectCreateRequest,
+    ProjectRenderLink,
     RenderSpec,
     RenderSummary,
     RenderValidation,
@@ -18,9 +20,18 @@ from videogen_service.models import (
     ScriptRequest,
     ScriptResult,
 )
+from videogen_service.projects import (
+    ProjectConflict,
+    ProjectError,
+    ProjectNotFound,
+    ProjectRecord,
+    ProjectStore,
+    ProjectSummary,
+)
 from videogen_service.renderer import H3Renderer, RenderError, Renderer
 from videogen_service.scripting import ScriptError, ScriptStudio, ScriptUnavailable
 from videogen_service.service import RenderConflict, RenderNotFound, RenderService
+from videogen_service.skills import SkillLibrary
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _MAX_REFERENCE_BYTES = 25 * 1024 * 1024
@@ -48,9 +59,13 @@ def create_app(
     studio: ScriptStudio | None = None,
 ) -> FastAPI:
     settings = config or load_config()
+    skills = SkillLibrary(settings.skills_dir)
     service = RenderService(
-        settings, renderer or H3Renderer(settings), studio=studio
+        settings,
+        renderer or H3Renderer(settings),
+        studio=studio or ScriptStudio(settings, skills=skills),
     )
+    projects = ProjectStore(settings.work_dir)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -102,11 +117,85 @@ def create_app(
         # Captions and the local LLM both take minutes; FastAPI runs this sync
         # handler on its worker threads, so the render queue keeps draining.
         try:
-            return service.script(request)
+            if request.project_id is not None:
+                # Checked up front so a typo'd project fails in milliseconds,
+                # not after minutes of captions and Ollama.
+                projects.get(request.project_id)
+            result = service.script(request)
+            if request.project_id is not None:
+                projects.add_draft(
+                    request.project_id, request=request, result=result
+                )
+            return result
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
         except ScriptUnavailable as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         except (ScriptError, RenderError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/skills")
+    def list_skills() -> list[dict[str, object]]:
+        return [
+            {
+                "skill_id": skill.skill_id,
+                "name": skill.meta.name,
+                "description": skill.meta.description,
+                "category": skill.meta.category,
+                "defaults": skill.meta.defaults.model_dump(exclude_none=True),
+            }
+            for skill in skills.list()
+        ]
+
+    @app.get("/v1/projects", response_model=list[ProjectSummary])
+    def list_projects() -> list[ProjectSummary]:
+        return projects.list()
+
+    @app.post(
+        "/v1/projects",
+        response_model=ProjectRecord,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_project(request: ProjectCreateRequest) -> ProjectRecord:
+        try:
+            return projects.create(
+                project_id=request.project_id, name=request.name
+            )
+        except ProjectConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ProjectError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/projects/{project_id}", response_model=ProjectRecord)
+    def get_project(project_id: str) -> ProjectRecord:
+        try:
+            return projects.get(project_id)
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.delete(
+        "/v1/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT
+    )
+    def delete_project(project_id: str) -> Response:
+        try:
+            projects.delete(project_id)
+        except ProjectNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ProjectConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post("/v1/projects/{project_id}/renders", response_model=ProjectRecord)
+    def link_project_render(
+        project_id: str, request: ProjectRenderLink
+    ) -> ProjectRecord:
+        try:
+            # The render must exist before it can be archived under a project;
+            # service.get raises the same not-found the render routes use.
+            service.get(request.render_id)
+            return projects.link_render(project_id, request.render_id)
+        except (ProjectNotFound, RenderNotFound) as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.post(
         "/v1/renders",

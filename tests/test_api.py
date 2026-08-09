@@ -19,6 +19,8 @@ def make_config(tmp_path: Path) -> ServiceConfig:
             "host": "127.0.0.1",
             "port": 8020,
             "work_dir": str(tmp_path / "work"),
+            # Pinned into the sandbox so the repo's real skills/ never leaks in.
+            "skills_dir": str(tmp_path / "skills"),
             "comfyui": {
                 "base_url": "http://127.0.0.1:8188",
                 "timeout_seconds": 1800,

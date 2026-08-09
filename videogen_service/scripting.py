@@ -25,6 +25,7 @@ from videogen_service.renderer import (
     storyboard_seconds,
     validate_storyboard,
 )
+from videogen_service.skills import Skill, SkillLibrary
 from videogen_service.transcript import (
     Transcript,
     TranscriptError,
@@ -119,15 +120,23 @@ class ScriptStudio:
         *,
         fetcher: TranscriptFetcher | None = None,
         summarizer: Summarizer | None = None,
+        skills: SkillLibrary | None = None,
     ) -> None:
         self._config = config
         self._fetcher = fetcher or YtDlpTranscriptFetcher(config.script)
         self._summarizer = summarizer or OllamaSummarizer(config)
+        self._skills = skills or SkillLibrary(config.skills_dir)
 
     def create(self, request: ScriptRequest) -> ScriptResult:
         settings = self._config.script
         if not settings.enabled:
             raise ScriptError("本服务没有开启字幕总结功能(script.enabled)")
+        skill: Skill | None = None
+        if request.skill is not None:
+            skill = self._skills.get(request.skill)
+            if skill is None:
+                raise ScriptError(f"Skill「{request.skill}」不存在或加载失败")
+            request = _apply_skill(request, skill)
         try:
             transcript = self._fetcher.fetch(request.url)
         except TranscriptUnavailable as error:
@@ -144,6 +153,7 @@ class ScriptStudio:
                     truncated=truncated,
                     request=request,
                     config=self._config,
+                    skill=skill,
                 )
             )
         )
@@ -198,6 +208,32 @@ def _preamble(*, title: str, style: str) -> str:
     return f"科普短片《{title}》。统一风格:{style}。"
 
 
+def _apply_skill(request: ScriptRequest, skill: Skill) -> ScriptRequest:
+    """Fill request fields the caller left unset from the skill's defaults.
+
+    Explicit request values always win; the skill only supplies what is
+    missing, and config defaults remain the final fallback downstream.
+    """
+    defaults = skill.meta.defaults
+    updates: dict[str, object] = {}
+    if request.style is None and defaults.style is not None:
+        updates["style"] = defaults.style
+    if request.target_seconds is None and defaults.target_seconds is not None:
+        updates["target_seconds"] = defaults.target_seconds
+    if request.shot_seconds is None and defaults.shot_seconds is not None:
+        updates["shot_seconds"] = defaults.shot_seconds
+    if request.max_shots is None and defaults.max_shots is not None:
+        updates["max_shots"] = defaults.max_shots
+    # output_language has a non-null default, so "the caller left it unset" is
+    # visible only through model_fields_set, not through the value itself.
+    if (
+        "output_language" not in request.model_fields_set
+        and defaults.output_language is not None
+    ):
+        updates["output_language"] = defaults.output_language
+    return request.model_copy(update=updates) if updates else request
+
+
 def build_summary_prompt(
     transcript: Transcript,
     *,
@@ -205,6 +241,7 @@ def build_summary_prompt(
     truncated: bool,
     request: ScriptRequest,
     config: ServiceConfig,
+    skill: Skill | None = None,
 ) -> str:
     settings = config.script
     renderer = config.renderer
@@ -234,6 +271,14 @@ def build_summary_prompt(
         'JSON 结构:{"title": "...", "summary": "...", "shots": '
         '[{"seconds": 6, "prompt": "...", "narration": "..."}]}',
     ]
+    if skill is not None and skill.instructions:
+        # The user's 额外要求 comes after these, so ad-hoc direction can still
+        # override a preset for one run.
+        lines += [
+            "",
+            f"创作规范(来自 Skill「{skill.meta.name}」,必须遵守):",
+            skill.instructions,
+        ]
     if request.guidance:
         lines += ["", f"额外要求:{request.guidance}"]
     if truncated:

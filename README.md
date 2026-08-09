@@ -91,7 +91,9 @@ Copy-Item config.example.yaml config.yaml
 - `GET /`、`GET /static/*`：视频生成台页面和它的三个静态文件。
 - `GET /health`：模式、分镜模式和限制。字段是和 `videotube` 之间的固定契约（那边用 `extra="forbid"` 解析），新东西一律不要往里加。
 - `GET /v1/scripts/config`：字幕总结的配置，页面用它决定默认时长和分镜数。
-- `POST /v1/scripts`：传一个 YouTube 网址，取字幕、让 Ollama 总结成分镜脚本。
+- `POST /v1/scripts`：传一个 YouTube 网址，取字幕、让 Ollama 总结成分镜脚本。可选 `skill` 套用一份具名创作规范，可选 `project_id` 把结果自动存成项目草稿。
+- `GET /v1/skills`：列出 `skills/` 里的创作预设。
+- `GET/POST /v1/projects`、`GET/DELETE /v1/projects/{id}`、`POST /v1/projects/{id}/renders`：项目工作区——脚本草稿和渲染的归档容器，见下文。
 - `GET /v1/renders`：列出全部渲染，带上当初提交的参数，页面的任务列表用它。
 - `POST /v1/validate`：在创建用户任务前校验模式、参考图和分镜，并返回对齐后的真实时长。
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
@@ -123,6 +125,13 @@ curl -s http://127.0.0.1:8020/v1/scripts \
 这一步只花 CPU 和 Ollama，不碰 GPU；要不要渲染、渲染几次仍然由原项目决定。取不到字幕、Ollama 没启动这类上游问题返回 `503`，链接不是 YouTube、模型没给出分镜这类返回 `400`。需要登录态或代理才能取字幕时，填 `script.cookies_file` 和 `script.proxy`。
 
 服务一次只让一个任务进入 GPU。状态以版本明确的 JSON 落在 `work/<render_id>/`；进程重启后，未完成任务会转为可重试的失败态，不会伪装成仍在运行。
+
+## 项目与 Skill
+
+这两个概念把孤立的"出脚本"和"出视频"串成一条可回溯的流程（设计与后续阶段见 `docs/refactor-design.md`）：
+
+- **项目**：一次创作的容器，落盘在 `work/.projects/<project_id>/project.json`。页面顶部选中一个项目后，生成的分镜脚本自动存成一版草稿（可随时回填表单重渲），提交的渲染自动挂进项目。删除项目不动已关联的渲染。
+- **Skill**：`skills/` 下每个子目录一份具名创作规范，结构是两个文件——`SKILL.md`（给模型读的说明书，整体注入总结 Prompt）和 `meta.yaml`（名称、描述、分类和可选默认参数 style/target_seconds/shot_seconds/max_shots/output_language）。请求里显式给的字段永远压过 Skill 默认值，Skill 默认值压过 config 默认值；`额外要求` 排在 Skill 规范之后，单次覆盖仍然可行。改动 Skill 文件立即生效，不用重启服务；写坏的 Skill 只会自己下线并留一条警告。仓库自带 `skills/science-doc` 作为样例。
 
 ## 验证
 

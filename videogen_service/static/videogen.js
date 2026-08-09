@@ -29,6 +29,12 @@ const composeNotice = document.getElementById("compose-notice");
 const generateButton = document.getElementById("generate-button");
 const jobList = document.getElementById("job-list");
 
+const projectSelect = document.getElementById("project-select");
+const projectNewButton = document.getElementById("project-new");
+const projectDrafts = document.getElementById("project-drafts");
+const draftList = document.getElementById("draft-list");
+const sourceSkill = document.getElementById("source-skill");
+
 const sourceBlock = document.getElementById("source-block");
 const sourceUrl = document.getElementById("source-url");
 const sourceTarget = document.getElementById("source-target");
@@ -608,6 +614,123 @@ function syncRatioButtons() {
   });
 }
 
+// ---- 项目与 Skill -----------------------------------------------------------
+// 项目把脚本草稿和渲染归档到一起（work/.projects/），Skill 是 skills/ 里的具名
+// 创作规范。两者都是可选项：不选时页面行为和从前完全一样。
+
+async function loadSkills() {
+  let skills;
+  try {
+    skills = await request("/v1/skills");
+  } catch (error) {
+    return; // Skill 列表挂了不拦生成，只是下拉里没得选。
+  }
+  for (const skill of skills) {
+    const option = document.createElement("option");
+    option.value = skill.skill_id;
+    option.textContent = skill.category
+      ? `${skill.name}（${skill.category}）`
+      : skill.name;
+    if (skill.description) option.title = skill.description;
+    sourceSkill.append(option);
+  }
+}
+
+async function loadProjects(selectedId) {
+  let projects;
+  try {
+    projects = await request("/v1/projects");
+  } catch (error) {
+    return;
+  }
+  const keep = selectedId ?? projectSelect.value;
+  while (projectSelect.options.length > 1) projectSelect.remove(1);
+  for (const project of projects) {
+    const option = document.createElement("option");
+    option.value = project.project_id;
+    option.textContent =
+      `${project.name}（${project.draft_count} 稿 · ${project.render_count} 渲染）`;
+    projectSelect.append(option);
+  }
+  if (keep && [...projectSelect.options].some((o) => o.value === keep)) {
+    projectSelect.value = keep;
+  }
+}
+
+async function refreshDrafts() {
+  const projectId = projectSelect.value;
+  if (!projectId) {
+    projectDrafts.hidden = true;
+    draftList.replaceChildren();
+    return;
+  }
+  let project;
+  try {
+    project = await request(`/v1/projects/${projectId}`);
+  } catch (error) {
+    projectDrafts.hidden = true;
+    return;
+  }
+  draftList.replaceChildren();
+  // 新草稿排前面，回填按钮把整份脚本重新写进表单。
+  for (const draft of [...project.drafts].reverse()) {
+    const item = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "draft-row";
+    const label = document.createElement("span");
+    const created = window.AppUI
+      ? AppUI.formatRelativeTime(draft.created_at)
+      : draft.created_at;
+    label.textContent =
+      `#${draft.draft_id} ${draft.result.title} · ${draft.result.seconds.toFixed(0)}s · ${created}`;
+    const fill = document.createElement("button");
+    fill.type = "button";
+    fill.className = "button button-ghost draft-fill";
+    fill.textContent = "回填";
+    fill.addEventListener("click", () => {
+      fillFromScript(draft.result);
+      notify(sourceNotice, `草稿 #${draft.draft_id} 已填进表单`, "ok");
+    });
+    row.append(label, fill);
+    item.append(row);
+    draftList.append(item);
+  }
+  projectDrafts.hidden = project.drafts.length === 0;
+}
+
+async function createProject() {
+  const name = window.prompt("项目名称：");
+  if (!name || !name.trim()) return;
+  try {
+    const project = await request("/v1/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    await loadProjects(project.project_id);
+    await refreshDrafts();
+    if (window.AppUI) AppUI.showToast("项目已创建", "success");
+  } catch (error) {
+    notify(composeNotice, error.message, "error");
+  }
+}
+
+// 渲染排队成功后把 render_id 挂进当前项目;挂失败不影响已排队的渲染。
+async function linkRenderToProject(renderId) {
+  const projectId = projectSelect.value;
+  if (!projectId) return;
+  try {
+    await request(`/v1/projects/${projectId}/renders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ render_id: renderId }),
+    });
+    await loadProjects(projectId);
+  } catch (error) {
+    notify(composeNotice, `已排队，但归档到项目失败：${error.message}`, "error");
+  }
+}
+
 // ---- YouTube 网址 → 分镜脚本 ------------------------------------------------
 
 function fillFromScript(script) {
@@ -656,11 +779,17 @@ async function createScript() {
         target_seconds: Number(sourceTarget.value) || null,
         max_shots: Number(sourceMaxShots.value) || null,
         guidance: sourceGuidance.value.trim() || null,
+        skill: sourceSkill.value || null,
+        project_id: projectSelect.value || null,
       }),
     });
     fillFromScript(script);
     notify(sourceNotice, "分镜已填进下面的提示词，改完再点生成", "ok");
     if (window.AppUI) AppUI.showToast("分镜脚本已生成", "success");
+    if (projectSelect.value) {
+      await loadProjects(projectSelect.value);
+      await refreshDrafts();
+    }
   } catch (error) {
     notify(sourceNotice, error.message, "error");
   } finally {
@@ -678,7 +807,8 @@ form.addEventListener("submit", async (event) => {
     // Reference frames ride along as multipart so the browser never has to
     // base64 a full-resolution still into JSON.
     const body = new FormData(form);
-    body.set("render_id", newRenderId());
+    const renderId = newRenderId();
+    body.set("render_id", renderId);
     // An empty number input posts "", which the service reads as a bad int.
     if (!String(body.get("seed") || "").trim()) body.delete("seed");
     for (const key of ["first_frame", "last_frame"]) {
@@ -687,6 +817,7 @@ form.addEventListener("submit", async (event) => {
     }
     await request("/v1/renders", { method: "POST", body });
     notify(composeNotice, "已排队，生成期间显卡会被独占", "ok");
+    await linkRenderToProject(renderId);
     await refreshJobs();
   } catch (error) {
     notify(composeNotice, error.message, "error");
@@ -696,6 +827,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 sourceButton.addEventListener("click", createScript);
+projectNewButton.addEventListener("click", createProject);
+projectSelect.addEventListener("change", refreshDrafts);
 sourceUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -793,6 +926,7 @@ async function start() {
   refreshModeFields();
   refreshLengthHint();
   syncRatioButtons();
+  await Promise.all([loadSkills(), loadProjects()]);
   // refreshJobs starts its own timer, and only while a job is in flight.
   await refreshJobs();
 }

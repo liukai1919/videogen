@@ -44,6 +44,20 @@
                 <h2>生成参数</h2>
               </div>
 
+              <div class="field">
+                <span class="field-label">项目（脚本草稿和渲染会归档进去，可不选）</span>
+                <div class="project-row">
+                  <select id="project-select" class="field-input">
+                    <option value="">不关联项目</option>
+                  </select>
+                  <button type="button" id="project-new" class="button button-secondary">新建</button>
+                </div>
+                <div class="vg-source-result" id="project-drafts" hidden>
+                  <strong>项目里的脚本草稿</strong>
+                  <ol class="vg-narration" id="draft-list"></ol>
+                </div>
+              </div>
+
               <details class="advanced-block" id="source-block" open>
                 <summary>从 YouTube 网址起稿</summary>
                 <div class="advanced-body">
@@ -70,6 +84,12 @@
                     <span class="field-label">额外要求（可留空）</span>
                     <input type="text" id="source-guidance" class="field-input"
                       placeholder="例如：面向初中生，多讲生活里的例子">
+                  </label>
+                  <label class="field">
+                    <span class="field-label">Skill（可复用的创作规范，可不选）</span>
+                    <select id="source-skill" class="field-input">
+                      <option value="">不用 Skill</option>
+                    </select>
                   </label>
                   <div id="source-notice" role="status"></div>
                   <button type="button" id="source-button" class="button button-secondary button-block">

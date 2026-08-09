@@ -102,6 +102,11 @@ class ScriptRequest(StrictModel):
     guidance: str | None = Field(default=None, max_length=2_000)
     style: str | None = Field(default=None, max_length=2_000)
     output_language: str = Field(default="中文", min_length=1, max_length=40)
+    # Named preset from skills/: fills the fields above where they are unset
+    # and injects its SKILL.md into the summary prompt.
+    skill: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    # When set, the finished script is also archived as a draft of the project.
+    project_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
 class ScriptShot(StrictModel):
@@ -130,6 +135,17 @@ class ScriptResult(StrictModel):
     prompt: str
     seconds: float
     shots: list[ScriptShot]
+
+
+class ProjectCreateRequest(StrictModel):
+    # Optional so a page can mint its own id the way it already does for
+    # renders; left out, the service mints one.
+    project_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ProjectRenderLink(StrictModel):
+    render_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
 
 
 class RenderView(StrictModel):

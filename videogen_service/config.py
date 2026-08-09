@@ -84,6 +84,8 @@ class ServiceConfig(StrictModel):
     host: str
     port: int = Field(ge=1, le=65_535)
     work_dir: Path
+    # 具名创作预设(SKILL.md + meta.yaml)所在目录;不存在时 Skill 列表为空。
+    skills_dir: Path = Path("skills")
     comfyui: ComfyUiConfig
     renderer: RendererConfig
     ollama: OllamaConfig
@@ -118,6 +120,7 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
     config = ServiceConfig.model_validate(raw)
     base_dir = config_path.parent
     work_dir = _resolve_path(base_dir, config.work_dir)
+    skills_dir = _resolve_path(base_dir, config.skills_dir)
     modes = {
         mode: settings.model_copy(
             update={"workflow_file": _resolve_path(base_dir, settings.workflow_file)}
@@ -130,7 +133,12 @@ def load_config(path: str | Path = "config.yaml") -> ServiceConfig:
             update={"cookies_file": _resolve_path(base_dir, script.cookies_file)}
         )
     return config.model_copy(
-        update={"work_dir": work_dir, "modes": modes, "script": script}
+        update={
+            "work_dir": work_dir,
+            "skills_dir": skills_dir,
+            "modes": modes,
+            "script": script,
+        }
     )
 
 

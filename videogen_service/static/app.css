@@ -524,6 +524,27 @@ select:focus {
   gap: 12px;
 }
 
+.project-row {
+  display: flex;
+  gap: 8px;
+}
+
+.project-row .field-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.draft-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.draft-row .draft-fill {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* ============================================================
    6. Status badges
    ============================================================ */
