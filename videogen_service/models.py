@@ -174,6 +174,14 @@ class JobSaveAssetRequest(StrictModel):
     category: str = Field(default="生成图", max_length=40)
 
 
+class ChatCreateRequest(StrictModel):
+    title: str | None = Field(default=None, max_length=120)
+
+
+class ChatSendRequest(StrictModel):
+    text: str = Field(min_length=1, max_length=20_000)
+
+
 class AssetFromRenderRequest(StrictModel):
     """Archive a submitted render's reference frame as a reusable asset."""
 

@@ -99,6 +99,7 @@ Copy-Item config.example.yaml config.yaml
 - `POST/GET/DELETE /v1/projects/{id}/pipeline` 及 `.../pipeline/{approve,reject,retry}`：自动流水线，见下文。
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
 - `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
+- `POST/GET /v1/chats`、`GET/DELETE /v1/chats/{id}`、`POST /v1/chats/{id}/messages`：Agent 对话。本地 Ollama tool-calling 循环，工具即平台能力：写分镜、排图片/配音任务、排 H3 渲染（可引用资产做参考帧）、查任务进度、看资产、记偏好。生成类工具只排队并立即返回任务 id，长渲染不会卡住对话；Memory 偏好自动注入系统提示；会话落盘 `work/.chats/`。
 - `GET /v1/capabilities`：平台能力目录——H3 视频各模式（提交走 `/v1/renders`）加上 config `capabilities` 里声明的本地能力（文生图、TTS，提交走 `/v1/jobs`）。
 - `POST/GET /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs/{id}/media`、`POST /v1/jobs/{id}/retry`、`DELETE /v1/jobs/{id}`、`POST /v1/jobs/{id}/save-asset`：通用生成任务队列。t2i 走 ComfyUI workflow（和渲染同一套节点指针机制），tts 走 config 里的本地命令模板；`needs_gpu` 的任务和 H3 渲染共享一把 GPU 锁轮流上卡，图片产物可一键存进资产中心。
 - `POST /v1/scripts/document`：上传本地 PDF/Word/文本，本机抽文本后走同一条 Ollama 总结路径生成分镜。

@@ -22,8 +22,8 @@ v1 五阶段建成的项目工作区、Skill、流水线、资产中心、Memory
 
 | 阶段 | 内容 |
 |---|---|
-| A（进行中）· 通用任务底座 | 能力注册表（t2i/tts 等本地能力，config 声明）；渲染队列泛化成生成任务队列（图片/音频与视频统一调度，共享 GPU 闸门）；`/v1/capabilities`、`/v1/jobs` |
-| B · Agent 对话核心 | Ollama tool-calling 的本地 Agent 循环，工具=平台能力（写脚本、生成图片/视频/配音、读文档、存取资产、挂项目）；`/v1/chat` 会话式 API，会话落盘 |
+| A（已实现）· 通用任务底座 | 能力注册表（t2i/tts 等本地能力，config 声明）；渲染队列泛化成生成任务队列（`videogen_service/jobs.py`，图片/音频与视频统一调度，共享 GPU 闸门）；`/v1/capabilities`、`/v1/jobs` |
+| B（已实现，后端）· Agent 对话核心 | `videogen_service/agent.py`：Ollama tool-calling 循环，工具=平台能力（写分镜、排图片/配音/视频任务、查进度、看资产、记偏好）；生成工具只排队立即返回 id，长渲染不卡对话；`/v1/chats` API，会话落盘 `work/.chats/`；对话 UI 归阶段 C |
 | C · 工作台 UI | 浏览器三区布局：左侧项目/Skill/资产，中间产物区（画布 lite：网格陈列生成节点），右侧 Agent 对话 |
 | D · 配音与成片 | TTS 能力出解说音轨；FFmpeg 合成层把分镜视频+配音+SRT 拼成成片（visual-director 契约的 composition 层落地）；成片进 Release Review |
 | E · 画布进阶 | 节点/连线、表格分镜节点、时间线节点、Agent 可感知画布操作 |

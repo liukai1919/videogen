@@ -9,6 +9,15 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import ValidationError
 from urllib.parse import quote, urlparse
 
+from videogen_service.agent import (
+    AgentService,
+    AgentUnavailable,
+    ChatClient,
+    ChatNotFound,
+    ChatRecord,
+    ChatSummary,
+    ToolBox,
+)
 from videogen_service.assets import (
     MEDIA_TYPES,
     AssetError,
@@ -33,6 +42,8 @@ from videogen_service.jobs import (
 from videogen_service.memory import MemoryEntry, MemoryNotFound, MemoryStore
 from videogen_service.models import (
     AssetFromRenderRequest,
+    ChatCreateRequest,
+    ChatSendRequest,
     JobSaveAssetRequest,
     MemoryAddRequest,
     ProjectCreateRequest,
@@ -94,6 +105,7 @@ def create_app(
     renderer: Renderer | None = None,
     studio: ScriptStudio | None = None,
     job_runner: JobRunner | None = None,
+    chat_client: ChatClient | None = None,
 ) -> FastAPI:
     settings = config or load_config()
     settings.work_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +125,19 @@ def create_app(
         settings, renders=service, projects=projects, studio=workshop
     )
     jobs = JobService(settings, runner=job_runner, gpu_gate=gpu_gate)
+    agent = AgentService(
+        settings,
+        toolbox=ToolBox(
+            settings,
+            renders=service,
+            jobs=jobs,
+            studio=workshop,
+            assets=assets,
+            memory=memory,
+        ),
+        client=chat_client,
+        memory=memory,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -324,6 +349,42 @@ def create_app(
                 "Cache-Control": "no-cache",
             },
         )
+
+    @app.post(
+        "/v1/chats", response_model=ChatRecord, status_code=status.HTTP_201_CREATED
+    )
+    def create_chat(request: ChatCreateRequest) -> ChatRecord:
+        return agent.create(title=request.title)
+
+    @app.get("/v1/chats", response_model=list[ChatSummary])
+    def list_chats() -> list[ChatSummary]:
+        return agent.list()
+
+    @app.get("/v1/chats/{chat_id}", response_model=ChatRecord)
+    def get_chat(chat_id: str) -> ChatRecord:
+        try:
+            return agent.get(chat_id)
+        except ChatNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/v1/chats/{chat_id}/messages", response_model=ChatRecord)
+    def send_chat(chat_id: str, request: ChatSendRequest) -> ChatRecord:
+        # One agent turn can take minutes of local model time; this sync
+        # handler runs on the worker threadpool like /v1/scripts does.
+        try:
+            return agent.send(chat_id, request.text)
+        except ChatNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except AgentUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.delete("/v1/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_chat(chat_id: str) -> Response:
+        try:
+            agent.delete(chat_id)
+        except ChatNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/v1/capabilities")
     def list_capabilities() -> list[dict[str, object]]:
