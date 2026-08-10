@@ -1,0 +1,79 @@
+# Key Decisions — 不带数据不得推翻
+
+这里钉住的是**用代价换来的默认值**：每条 = 结论 + 证据 + 推翻条件。
+想改其中任何一条，先在 [scenarios.md](./scenarios.md) 相关场景上跑出新数据
+（按 [README.md](./README.md) 的轮次协议 ≥3 轮稳定），把数据附在改动的 PR 里。
+
+范围说明：架构级冻结约束（一切本地不引云端、`/v1/renders` 等冻结契约）记录在
+`docs/refactor-design.md` §2，那是**不可谈判项**，不在本台账重复；这里只收
+"有人可能想改、但必须带数据来改"的经验默认值。
+
+---
+
+## D1 · 渲染分辨率包络 864x480；1080p 只在成片阶段放大
+
+- **结论**：渲染队列永不排 1080p。要高清交付，走 `compose_video` 的
+  `upscale_height=1080`（lanczos 先放大后烧字幕，FFmpeg 走 CPU 不占 GPU 闸门）。
+- **证据**：32GB 显存下 1080p 直渲 OOM；5ff9625 以"渲染保持包络内 + 成片放大"
+  跑通 1080p 交付，且合成不占卡。
+- **推翻条件**：新硬件或新权重下，1080p 直渲在 S1/S2 场景连跑 3 轮无 OOM，
+  且单段耗时不劣于"包络渲染+放大"路径。
+
+## D2 · 单条渲染 ≤15s（max_seconds）；长片走 story 拆链，总长 ≤120s（max_total_seconds）
+
+- **结论**：t2v/i2v/flf2v/r2v 单条不超 `renderer.max_seconds`（当前 15s）；
+  更长内容用 story 模式一次提交，渲染器按帧数贪心装块、逐块串行渲染、
+  ffmpeg concat 拼片，每块换种子防雷同，进度跨块连续。
+- **证据**：单段超包络在本机 OOM（长期实测红线）；拆链机制 5ff9625 实测成片。
+- **推翻条件**：显存升级或轻量权重下，>15s 单段在 S2 场景 3 轮无 OOM 且
+  画质/一致性不降，方可上调 `max_seconds`。
+
+## D3 · 长片一致性 = 拆链 + 帧接力（续标记） + r2v 定妆参考贯穿每块
+
+- **结论**：三件套一起用：拆链保住显存；`[Xs-Ys续]` 标记的动作延续在块边界
+  单独成块、取上一块尾帧作 i2v 锚点，动作不断线；r2v 的 `ref_assets` 定妆参考
+  在拆链时每块同组贯穿，角色不换脸。Director 节点跨段自动带尾帧+外观参考。
+- **证据**：5ff9625 长片成片实测；单靠文字描述身份跨段必换脸。
+- **推翻条件**：出现单一机制（如原生长片模型）在 S3/S4 一致性场景得分
+  不低于三件套组合，且成本更低。
+
+## D4 · H3 提示词遵官方规范；角色对白原生出声（TAV），解说旁白 TTS 压混
+
+- **结论**：对白写进 H3 提示词用官方对白语法原生出声；第三人称解说用本地 TTS，
+  `compose_video` 压混在 H3 原生音轨上——不给角色贴 TTS 嘴，不静音原生轨。
+- **证据**：fa0de0e 对齐官方规范后出片质量与音画对齐显著改善；TTS 念对白必假。
+- **推翻条件**：新分工（全原生或全 TTS）在 S10 场景音画对齐评分更高。
+
+## D5 · 渲染前强制卸载 Ollama 大模型（unload_before_render: true）
+
+- **结论**：把卡交给 ComfyUI 之前，先让 Ollama 立即卸载 27B 级 LLM。
+- **证据**：H3 和 27B LLM 无法同驻一张 32GB 卡（config.example.yaml 注释）。
+- **推翻条件**：换更小 LLM 或显存升级后，共存跑 S1 全链 3 轮无 OOM。
+
+## D6 · 对话内生成工具排队即返回，不阻塞对话
+
+- **结论**：`generate_*`/`compose_video` 立即返回 id，进度用 `check_render`/
+  `check_job` 拉取。刻意不抄 Higgsfield CLI 的 `--wait` 默认——它们的 agent
+  就是终端，我们的对话 agent 要在长渲染下保持可用（S9）。
+- **证据**：v2 阶段 B 设计（docs/refactor-design.md）；长渲染动辄十几分钟，
+  阻塞即对话不可用。
+- **推翻条件**：不推翻本默认；外部 worker 需要阻塞语义时**新增** wait 类工具
+  解决（对标计划 M3.4），不改对话内行为。
+
+## D8 · WSL 内存上限 40GB（32GB 已被证伪，52GB 亦被证伪）
+
+- **结论**：`.wslconfig` `memory=40GB` + `swap=16GB`。上下都有尸体：52GB 时
+  WSL 吃到 49GB、Windows 剩 1.5GB 整机换页；32GB 时渲染启动窗口峰值
+  31.75GB 顶穿死线，两晚 7 次内核 OOM 击杀 ComfyUI（story 约六成失败）。
+- **证据**：journalctl 7 次击杀记录与 7 条 FAILED 渲染一一对应；探针实测
+  空载匿名 24GB、块启动峰值 31.75GB、采样稳态 20.5GB
+  （docs/comfyui-oom-rootcause.md）。
+- **推翻条件**：模型/量化方案变更导致驻留或峰值明显变化时，用同款探针
+  （scratchpad ab-arm.sh + RssAnon 采样）重测后再调。
+
+## D7 · 参数优先级：显式请求 > Skill 缺省 > config 兜底
+
+- **结论**：用户明说的永远赢；Skill 只补请求里留空的旋钮（style、target_seconds、
+  shot_seconds、max_shots、output_language）；config 是最终兜底。
+- **证据**：`videogen_service/scripting.py` `_apply_skill` 即此语义（S7 场景守护）。
+- **推翻条件**：原则上不推翻——列在这里是防止将来把技能做成"强制覆盖用户"的倒退。

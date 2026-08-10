@@ -2,11 +2,11 @@
   "1": {
     "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
       "weight_dtype": "default"
     },
     "_meta": {
-      "title": "UNet加载器"
+      "title": "UNet加载器（Ref2VA 参考生成权重）"
     }
   },
   "2": {
@@ -57,7 +57,7 @@
         "2",
         0
       ],
-      "task_type": "t2v — 文生视频(Text to Video)",
+      "task_type": "r2v — 参考主体生视频(Reference to Video)",
       "global_prompt": "",
       "bd_grp_sample": "采样设置",
       "cfg": 1.0,
@@ -79,7 +79,7 @@
       "export_source_images": false
     },
     "_meta": {
-      "title": "MiniMax H3 Director"
+      "title": "MiniMax H3 Director（r2v）"
     }
   },
   "6": {
@@ -107,7 +107,7 @@
         "6",
         0
       ],
-      "filename_prefix": "video/MiniMax_H3_Director",
+      "filename_prefix": "video/MiniMax_H3_R2V",
       "format": "auto",
       "codec": "auto"
     },

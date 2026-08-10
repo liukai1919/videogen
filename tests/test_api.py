@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import threading
 import time
@@ -8,6 +9,8 @@ from fastapi.testclient import TestClient
 from videogen_service.api import create_app
 from videogen_service.config import ServiceConfig
 from videogen_service.models import RenderProgress, RenderRequest
+from videogen_service.scripting import ScriptStudio, ScriptUnavailable, Summarizer
+from videogen_service.transcript import Transcript, canonical_youtube_url
 
 
 def make_config(tmp_path: Path) -> ServiceConfig:
@@ -16,6 +19,8 @@ def make_config(tmp_path: Path) -> ServiceConfig:
             "host": "127.0.0.1",
             "port": 8020,
             "work_dir": str(tmp_path / "work"),
+            # Pinned into the sandbox so the repo's real skills/ never leaks in.
+            "skills_dir": str(tmp_path / "skills"),
             "comfyui": {
                 "base_url": "http://127.0.0.1:8188",
                 "timeout_seconds": 1800,
@@ -51,6 +56,48 @@ def make_config(tmp_path: Path) -> ServiceConfig:
     )
 
 
+class FakeFetcher:
+    def fetch(self, url: str) -> Transcript:
+        video_id, watch_url = canonical_youtube_url(url)
+        return Transcript(
+            video_id=video_id,
+            title="Why the sky is blue",
+            url=watch_url,
+            language="en",
+            automatic=True,
+            duration_seconds=640.0,
+            text="Sunlight scatters off air molecules.",
+        )
+
+
+class FakeSummarizer:
+    def summarize(self, prompt: str) -> str:
+        return json.dumps(
+            {
+                "title": "蓝天为什么是蓝的",
+                "summary": "短波长的蓝光被散射得最多。",
+                "shots": [
+                    {"seconds": 6, "prompt": "航拍晴朗天空", "narration": "抬头就是蓝色"},
+                    {"seconds": 6, "prompt": "阳光散射示意", "narration": "蓝光散得最开"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+
+class FailingSummarizer:
+    def summarize(self, prompt: str) -> str:
+        raise ScriptUnavailable("连不上 Ollama(http://127.0.0.1:11434)")
+
+
+def fake_studio(tmp_path: Path, *, summarizer: Summarizer | None = None) -> ScriptStudio:
+    return ScriptStudio(
+        make_config(tmp_path),
+        fetcher=FakeFetcher(),
+        summarizer=summarizer or FakeSummarizer(),
+    )
+
+
 class FakeRenderer:
     def __init__(self) -> None:
         self.requests: list[RenderRequest] = []
@@ -60,6 +107,7 @@ class FakeRenderer:
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         if on_progress is not None:
@@ -75,6 +123,20 @@ class FakeRenderer:
         return b"FAKE-MP4"
 
 
+class FailingOnceRenderer(FakeRenderer):
+    def render(
+        self,
+        request: RenderRequest,
+        *,
+        on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> bytes:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise RuntimeError("ComfyUI 掉线了")
+        return b"FAKE-MP4"
+
+
 class BlockingRenderer(FakeRenderer):
     def __init__(self) -> None:
         super().__init__()
@@ -86,6 +148,7 @@ class BlockingRenderer(FakeRenderer):
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         self.started.set()
@@ -120,7 +183,8 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
         "length_offset": 5,
         "shot_header_pattern": (
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
-            r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
+            r"(\d+(?:\.\d+)?)\s*s?\s*)?"
+            r"\s*(续|接)?\s*\]\s*(.*)$"
         ),
     }
 
@@ -197,6 +261,175 @@ def test_validation_returns_the_aligned_storyboard_duration(tmp_path: Path) -> N
     }
 
 
+def test_a_youtube_url_becomes_a_storyboard_that_renders(tmp_path: Path) -> None:
+    renderer = FakeRenderer()
+    app = create_app(
+        make_config(tmp_path),
+        renderer=renderer,
+        studio=fake_studio(tmp_path),
+    )
+    with TestClient(app) as client:
+        script = client.post(
+            "/v1/scripts", json={"url": "https://youtu.be/dQw4w9WgXcQ"}
+        )
+        assert script.status_code == 200
+        result = script.json()
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_from_youtube",
+                "mode": result["mode"],
+                "prompt": result["prompt"],
+                "width": "864",
+                "height": "480",
+                "seconds": str(result["seconds"]),
+            },
+        )
+        assert submitted.status_code == 202
+        state = wait_for_done(client, "vg_from_youtube")
+
+    assert result["source"]["video_id"] == "dQw4w9WgXcQ"
+    assert [shot["prompt"] for shot in result["shots"]] == ["航拍晴朗天空", "阳光散射示意"]
+    assert state["status"] == "DONE"
+    assert renderer.requests[0].prompt == result["prompt"]
+
+
+def test_an_unreachable_ollama_is_reported_as_a_dependency_outage(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        make_config(tmp_path),
+        renderer=FakeRenderer(),
+        studio=fake_studio(tmp_path, summarizer=FailingSummarizer()),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/scripts", json={"url": "https://youtu.be/dQw4w9WgXcQ"}
+        )
+
+    assert response.status_code == 503
+    assert "Ollama" in response.json()["detail"]
+
+
+def test_a_link_that_is_not_youtube_is_rejected(tmp_path: Path) -> None:
+    app = create_app(
+        make_config(tmp_path), renderer=FakeRenderer(), studio=fake_studio(tmp_path)
+    )
+    with TestClient(app) as client:
+        response = client.post("/v1/scripts", json={"url": "https://vimeo.com/12345"})
+
+    assert response.status_code == 400
+
+
+def test_health_stays_byte_compatible_with_the_control_plane(tmp_path: Path) -> None:
+    # The sibling project parses /health with extra="forbid", so console-only
+    # settings live on their own endpoint instead of being folded in here.
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        health = client.get("/health").json()
+        script = client.get("/v1/scripts/config").json()
+
+    assert "script" not in health
+    assert script["enabled"] is True
+    assert script["model"] == "qwen3.6:27b"
+    assert script["max_shots"] == 8
+
+
+def test_the_console_lists_renders_with_the_spec_that_made_them(
+    tmp_path: Path,
+) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_listed",
+                "mode": "t2v",
+                "prompt": "晨雾中的山谷",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+        )
+        assert wait_for_done(client, "vg_listed")["status"] == "DONE"
+        listed = client.get("/v1/renders")
+
+    assert listed.status_code == 200
+    jobs = listed.json()
+    assert len(jobs) == 1
+    assert jobs[0]["render_id"] == "vg_listed"
+    assert jobs[0]["prompt"] == "晨雾中的山谷"
+    assert jobs[0]["mode"] == "t2v"
+    assert jobs[0]["width"] == 864
+    assert jobs[0]["media_url"] == "/v1/renders/vg_listed/media"
+    assert jobs[0]["created_at"]
+    assert jobs[0]["elapsed_seconds"] is None
+
+
+def test_a_failed_render_is_retried_from_the_stored_request(tmp_path: Path) -> None:
+    renderer = FailingOnceRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_retry",
+                "mode": "i2v",
+                "prompt": "让湖面泛起涟漪",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+            files={"first_frame": ("first.png", b"PNG", "image/png")},
+        )
+        assert wait_for_done(client, "vg_retry")["status"] == "FAILED"
+        retried = client.post("/v1/renders/vg_retry/retry")
+        state = wait_for_done(client, "vg_retry")
+
+    assert retried.status_code == 202
+    assert state["status"] == "DONE"
+    # The reference frame is re-read from disk, not re-uploaded by the browser.
+    second = renderer.requests[1]
+    assert second.first_frame is not None
+    assert second.first_frame.read_bytes() == b"PNG"
+
+
+def test_an_in_flight_render_cannot_be_retried(tmp_path: Path) -> None:
+    renderer = BlockingRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_busy",
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+        )
+        assert renderer.started.wait(1)
+        conflict = client.post("/v1/renders/vg_busy/retry")
+        renderer.release.set()
+        wait_for_done(client, "vg_busy")
+
+    assert conflict.status_code == 409
+
+
+def test_the_console_page_and_its_assets_are_served(tmp_path: Path) -> None:
+    with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
+        page = client.get("/")
+        script = client.get("/static/videogen.js")
+        style = client.get("/static/app.css")
+        traversal = client.get("/static/../config.yaml")
+        unknown = client.get("/static/secrets.txt")
+
+    assert page.status_code == 200
+    assert "视频生成" in page.text
+    assert script.status_code == 200
+    assert "/v1/scripts" in script.text
+    assert style.status_code == 200
+    assert traversal.status_code == 404
+    assert unknown.status_code == 404
+
+
 def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
     with TestClient(create_app(make_config(tmp_path), renderer=FakeRenderer())) as client:
         response = client.post(
@@ -214,6 +447,44 @@ def test_image_mode_validation_requires_a_first_frame(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert "首帧" in response.json()["detail"]
+
+
+def test_text_mode_refuses_a_reference_frame_it_cannot_patch(tmp_path: Path) -> None:
+    renderer = FakeRenderer()
+    with TestClient(create_app(make_config(tmp_path), renderer=renderer)) as client:
+        validated = client.post(
+            "/v1/validate",
+            json={
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": 864,
+                "height": 480,
+                "seconds": 5,
+                "has_first_frame": True,
+                "has_last_frame": False,
+            },
+        )
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "vg_stray_frame",
+                "mode": "t2v",
+                "prompt": "湖面",
+                "width": "864",
+                "height": "480",
+                "seconds": "5",
+            },
+            files={"first_frame": ("first.png", b"PNG", "image/png")},
+        )
+        missing = client.get("/v1/renders/vg_stray_frame")
+
+    assert validated.status_code == 400
+    assert "不接首帧" in validated.json()["detail"]
+    # The frame must be refused at the seam, not accepted and then failed after
+    # the renderer has already uploaded it to ComfyUI.
+    assert submitted.status_code == 400
+    assert missing.status_code == 404
+    assert renderer.requests == []
 
 
 def test_unknown_mode_is_a_client_error_not_a_worker_crash(tmp_path: Path) -> None:

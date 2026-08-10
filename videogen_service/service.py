@@ -6,6 +6,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import re
 import shutil
+import subprocess
 from threading import Event, Lock, Thread
 
 from videogen_service.artifacts import write_bytes_atomic, write_json_atomic
@@ -15,17 +16,22 @@ from videogen_service.models import (
     RenderRecord,
     RenderRequest,
     RenderSpec,
+    RenderSummary,
     RenderValidation,
     RenderValidationRequest,
     RenderView,
+    ScriptRequest,
+    ScriptResult,
 )
 from videogen_service.renderer import (
     LENGTH_OFFSET,
     LENGTH_STEP,
     SHOT_HEADER,
+    RenderCancelled,
     Renderer,
     validate_render,
 )
+from videogen_service.scripting import ScriptStudio
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _RENDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -42,12 +48,27 @@ class RenderConflict(RuntimeError):
 class RenderService:
     """Owns durable render execution behind the HTTP service boundary."""
 
-    def __init__(self, config: ServiceConfig, renderer: Renderer) -> None:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        renderer: Renderer,
+        *,
+        studio: ScriptStudio | None = None,
+        # threading.Lock is a factory, not a class, so the annotation must stay
+        # a string to avoid evaluating Lock | None at runtime.
+        gpu_gate: "Lock | None" = None,
+    ) -> None:
         self._config = config
         self._renderer = renderer
+        self._studio = studio or ScriptStudio(config)
+        # One card, many workers: the render queue and the generation-job queue
+        # (jobs.py) take turns through this shared gate.
+        self._gpu_gate = gpu_gate or Lock()
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
+        # 取消请求的登记簿:worker 出队时跳过,渲染器在块边界/轮询点自查。
+        self._cancel_requests: set[str] = set()
         self._config.work_dir.mkdir(parents=True, exist_ok=True)
         self._recover_interrupted()
         self._worker = Thread(
@@ -74,6 +95,20 @@ class RenderService:
             "length_step": LENGTH_STEP,
             "length_offset": LENGTH_OFFSET,
             "shot_header_pattern": SHOT_HEADER.pattern,
+        }
+
+    def script_config(self) -> dict[str, object]:
+        # Deliberately not folded into /health: the sibling control plane parses
+        # that payload with extra="forbid", so it is a frozen contract.
+        settings = self._config.script
+        return {
+            "enabled": settings.enabled,
+            "model": settings.model or self._config.ollama.model,
+            "subtitle_languages": list(settings.subtitle_languages),
+            "target_seconds": settings.target_seconds,
+            "shot_seconds": settings.shot_seconds,
+            "max_shots": settings.max_shots,
+            "max_source_seconds": settings.max_source_seconds,
         }
 
     def close(self) -> None:
@@ -104,12 +139,17 @@ class RenderService:
             has_last_frame=request.has_last_frame,
         )
 
+    def script(self, request: ScriptRequest) -> ScriptResult:
+        return self._studio.create(request)
+
     def submit(
         self,
         spec: RenderSpec,
         *,
         first_frame: tuple[str, bytes] | None,
         last_frame: tuple[str, bytes] | None,
+        refs: list[tuple[str, bytes]] | None = None,
+        segment_refs: list[tuple[str, bytes]] | None = None,
     ) -> RenderView:
         if self._closing.is_set():
             raise RenderConflict("渲染服务正在关闭")
@@ -118,11 +158,19 @@ class RenderService:
             config=self._config,
             has_first_frame=first_frame is not None,
             has_last_frame=last_frame is not None,
+            ref_count=len(refs or []),
+            segment_ref_count=len(segment_refs or []),
         )
         # The validated duration is canonical: storyboard requests are aligned
         # shot-by-shot and the control plane must observe that exact total.
         spec = spec.model_copy(update={"seconds": validation.seconds})
-        fingerprint = _fingerprint(spec, first_frame=first_frame, last_frame=last_frame)
+        fingerprint = _fingerprint(
+            spec,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            refs=refs,
+            segment_refs=segment_refs,
+        )
         with self._state_lock:
             if self._closing.is_set():
                 raise RenderConflict("渲染服务正在关闭")
@@ -140,7 +188,11 @@ class RenderService:
                     else:
                         return self._view(existing)
             request = self._store_request(
-                spec, first_frame=first_frame, last_frame=last_frame
+                spec,
+                first_frame=first_frame,
+                last_frame=last_frame,
+                refs=refs,
+                segment_refs=segment_refs,
             )
             now = _now()
             record = RenderRecord(
@@ -162,6 +214,106 @@ class RenderService:
             if record is None:
                 raise RenderNotFound(f"render {render_id} 不存在")
             return self._view(record)
+
+    def list_renders(self) -> list[RenderSummary]:
+        """Newest first, for the console's job list."""
+        with self._state_lock:
+            summaries: list[RenderSummary] = []
+            for path in self._config.work_dir.glob("*/state.json"):
+                record = self._read_record(path)
+                if record is None or record.render_id != path.parent.name:
+                    continue
+                request = self._read_request(path.parent)
+                if request is None:
+                    continue
+                summaries.append(self._summary(record, request))
+        summaries.sort(key=lambda summary: summary.created_at, reverse=True)
+        return summaries
+
+    def retry(self, render_id: str) -> RenderView:
+        """Re-queue a finished render from the request already on disk."""
+        with self._state_lock:
+            if self._closing.is_set():
+                raise RenderConflict("渲染服务正在关闭")
+            record = self._load_record(render_id)
+            if record is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            if record.status in {"QUEUED", "RUNNING"}:
+                raise RenderConflict("这条任务还在队列里")
+            request = self._read_request(self._render_dir(render_id))
+            if request is None:
+                raise RenderNotFound(f"render {render_id} 的请求已经不在了")
+            self._save_record(
+                record.model_copy(
+                    update={
+                        "status": "QUEUED",
+                        "progress": None,
+                        "error": None,
+                        "updated_at": _now(),
+                    }
+                )
+            )
+            self._queue.put(request)
+        return self.get(render_id)
+
+    def cancel(self, render_id: str) -> RenderView:
+        """取消一条渲染。QUEUED 直接标终态等 worker 跳过;RUNNING 登记
+        取消请求,渲染器在轮询点收手(若正跑的 ComfyUI prompt 确认是
+        我们的,顺带请求中断)。终态沿用 FAILED + 可读错误文案,不给
+        冻结契约引入新状态值。"""
+        with self._state_lock:
+            record = self._load_record(render_id)
+            if record is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            if record.status not in {"QUEUED", "RUNNING"}:
+                raise RenderConflict(f"这条渲染已经结束({record.status}),没有可取消的")
+            self._cancel_requests.add(render_id)
+        if record.status == "QUEUED":
+            # worker 还没接手;先标终态,worker 出队时看登记簿跳过执行。
+            self._change(
+                render_id,
+                lambda rec: rec.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "progress": None,
+                        "error": "已取消(用户请求,未开始渲染)",
+                        "updated_at": _now(),
+                    }
+                ),
+            )
+        return self.get(render_id)
+
+    def request_prompt(self, render_id: str) -> str | None:
+        """这条渲染当初的提示词(分镜原文),给成片评分当创作意图对照。"""
+        request = self._read_request(self._render_dir(render_id))
+        return request.prompt if request is not None else None
+
+    def frame_path(self, render_id: str, slot: str) -> Path:
+        """Where a render's frame lives, for archival into the asset center.
+        上传过的输入参考帧优先;没有就从成片 output.mp4 现抽一帧
+        (定妆照、风格钥匙都从这里出)。"""
+        with self._state_lock:
+            if self._load_record(render_id) is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            directory = self._render_dir(render_id)
+            request = self._read_request(directory)
+            stored = (
+                (request.first_frame if slot == "first" else request.last_frame)
+                if request is not None
+                else None
+            )
+            if stored is not None and stored.is_file():
+                return stored
+            video = directory / "output.mp4"
+            if not video.is_file():
+                slot_name = "首帧" if slot == "first" else "尾帧"
+                raise RenderNotFound(
+                    f"render {render_id} 没有{slot_name}参考图,也没有成片可抽帧"
+                )
+            target = directory / f"out_{slot}.png"
+            if not target.is_file():
+                _extract_output_frame(video, slot=slot, target=target)
+            return target
 
     def media_path(self, render_id: str) -> Path:
         with self._state_lock:
@@ -195,6 +347,10 @@ class RenderService:
                     return
                 if self._closing.is_set():
                     self._fail_for_shutdown(request.render_id)
+                elif request.render_id in self._cancel_requests:
+                    # 排队期已被取消,cancel() 标好了终态,这里只清登记。
+                    with self._state_lock:
+                        self._cancel_requests.discard(request.render_id)
                 else:
                     self._run(request)
             finally:
@@ -210,6 +366,7 @@ class RenderService:
                         "status": "RUNNING",
                         "progress": None,
                         "error": None,
+                        "started_at": _now(),
                         "updated_at": _now(),
                     }
                 ),
@@ -223,7 +380,12 @@ class RenderService:
                     ),
                 )
 
-            output = self._renderer.render(request, on_progress=report)
+            with self._gpu_gate:
+                output = self._renderer.render(
+                    request,
+                    on_progress=report,
+                    should_cancel=lambda: render_id in self._cancel_requests,
+                )
             write_bytes_atomic(self._render_dir(render_id) / "output.mp4", output)
             self._change(
                 render_id,
@@ -232,6 +394,18 @@ class RenderService:
                         "status": "DONE",
                         "progress": None,
                         "error": None,
+                        "updated_at": _now(),
+                    }
+                ),
+            )
+        except RenderCancelled:
+            self._change(
+                render_id,
+                lambda record: record.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "progress": None,
+                        "error": "已取消(用户请求)",
                         "updated_at": _now(),
                     }
                 ),
@@ -248,6 +422,9 @@ class RenderService:
                     }
                 ),
             )
+        finally:
+            with self._state_lock:
+                self._cancel_requests.discard(render_id)
 
     def _fail_for_shutdown(self, render_id: str) -> None:
         self._change(
@@ -277,13 +454,30 @@ class RenderService:
         *,
         first_frame: tuple[str, bytes] | None,
         last_frame: tuple[str, bytes] | None,
+        refs: list[tuple[str, bytes]] | None = None,
+        segment_refs: list[tuple[str, bytes]] | None = None,
     ) -> RenderRequest:
         directory = self._render_dir(spec.render_id)
         directory.mkdir(parents=True, exist_ok=True)
         first_path = self._store_frame(directory, "first", first_frame)
         last_path = self._store_frame(directory, "last", last_frame)
+        ref_paths = [
+            path
+            for index, ref in enumerate(refs or [])
+            if (path := self._store_frame(directory, f"ref{index}", ref)) is not None
+        ]
+        segment_ref_paths = [
+            path
+            for index, ref in enumerate(segment_refs or [])
+            if (path := self._store_frame(directory, f"segref{index}", ref))
+            is not None
+        ]
         request = RenderRequest(
-            **spec.model_dump(), first_frame=first_path, last_frame=last_path
+            **spec.model_dump(),
+            first_frame=first_path,
+            last_frame=last_path,
+            refs=ref_paths,
+            segment_refs=segment_ref_paths,
         )
         write_json_atomic(
             directory / "request.json", request.model_dump(mode="json")
@@ -303,13 +497,23 @@ class RenderService:
         write_bytes_atomic(destination, data)
         return destination
 
+    def _read_record(self, path: Path) -> RenderRecord | None:
+        try:
+            return RenderRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _read_request(self, directory: Path) -> RenderRequest | None:
+        path = directory / "request.json"
+        try:
+            return RenderRequest.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def _recover_interrupted(self) -> None:
         for path in self._config.work_dir.glob("*/state.json"):
-            try:
-                record = RenderRecord.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
+            record = self._read_record(path)
+            if record is None:
                 continue
             if record.render_id != path.parent.name or not _RENDER_ID.fullmatch(
                 record.render_id
@@ -348,6 +552,24 @@ class RenderService:
         )
 
     @staticmethod
+    def _summary(record: RenderRecord, request: RenderRequest) -> RenderSummary:
+        view = RenderService._view(record)
+        return RenderSummary(
+            **view.model_dump(),
+            mode=request.mode,
+            prompt=request.prompt,
+            width=request.width,
+            height=request.height,
+            seconds=request.seconds,
+            seed=request.seed,
+            has_first_frame=request.first_frame is not None,
+            has_last_frame=request.last_frame is not None,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            elapsed_seconds=_elapsed_seconds(record),
+        )
+
+    @staticmethod
     def _view(record: RenderRecord) -> RenderView:
         return RenderView(
             render_id=record.render_id,
@@ -362,18 +584,37 @@ class RenderService:
         )
 
 
+def _extract_output_frame(video: Path, *, slot: str, target: Path) -> None:
+    """从成片抽首帧或尾帧存成 PNG(FFmpeg,CPU)。"""
+    args = ["ffmpeg", "-y"]
+    if slot == "last":
+        args += ["-sseof", "-0.5"]
+    args += ["-i", str(video), "-frames:v", "1", str(target)]
+    try:
+        completed = subprocess.run(args, capture_output=True, timeout=60)
+    except FileNotFoundError as error:
+        raise RenderNotFound("抽帧需要 ffmpeg,请先安装并放进 PATH") from error
+    except subprocess.TimeoutExpired as error:
+        raise RenderNotFound("成片抽帧超时(60s)") from error
+    if completed.returncode != 0 or not target.is_file():
+        detail = completed.stderr.decode("utf-8", errors="replace")[-200:]
+        raise RenderNotFound(f"成片抽帧失败: {detail}")
+
+
 def _fingerprint(
     spec: RenderSpec,
     *,
     first_frame: tuple[str, bytes] | None,
     last_frame: tuple[str, bytes] | None,
+    refs: list[tuple[str, bytes]] | None = None,
+    segment_refs: list[tuple[str, bytes]] | None = None,
 ) -> str:
     digest = hashlib.sha256(
         json.dumps(
             spec.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
     )
-    for frame in (first_frame, last_frame):
+    for frame in (first_frame, last_frame, *(refs or []), *(segment_refs or [])):
         digest.update(b"\0")
         if frame is not None:
             digest.update(frame[1])
@@ -382,3 +623,14 @@ def _fingerprint(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _elapsed_seconds(record: RenderRecord) -> float | None:
+    """How long an in-flight render has been on the card, for the progress bar."""
+    if record.status != "RUNNING" or record.started_at is None:
+        return None
+    try:
+        started = datetime.fromisoformat(record.started_at)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(UTC) - started).total_seconds())

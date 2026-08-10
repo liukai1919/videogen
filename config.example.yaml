@@ -1,6 +1,8 @@
 host: "127.0.0.1"
 port: 8020
 work_dir: "./work"
+# 具名创作预设:每个子目录一个 Skill(meta.yaml + SKILL.md),生成分镜时可选用。
+skills_dir: "./skills"
 
 comfyui:
   base_url: "http://127.0.0.1:8188"
@@ -13,6 +15,10 @@ renderer:
   max_seconds: 15.0
   max_total_seconds: 120.0
   max_shots: 12
+  # 2026-08-10 核查为空转开关:节点只在 ads2v 消费该键,对 story 的
+  # t2v/gen_blank 段无效;保持 false。跨块一致性由帧接力(续标记)+
+  # r2v 定妆承担,详见 docs/continuity-prefix-frames.md。
+  continuous_reference: false
 
 ollama:
   # H3 and a 27B LLM do not fit on the same 32GB GPU. The service asks Ollama
@@ -20,6 +26,71 @@ ollama:
   unload_before_render: true
   base_url: "http://127.0.0.1:11434"
   model: "qwen3.6:27b"
+
+script:
+  # YouTube 网址 → yt-dlp 取字幕 → Ollama 总结 → 分镜脚本(POST /v1/scripts)。
+  enabled: true
+  # 留空则复用 ollama.model。
+  model: null
+  temperature: 0.4
+  timeout_seconds: 600
+  fetch_timeout_seconds: 60
+  # 按顺序挑字幕语言,人工字幕优先于自动字幕。
+  subtitle_languages: ["zh-Hans", "zh-Hant", "zh", "en"]
+  max_transcript_chars: 24000
+  max_source_seconds: 14400
+  target_seconds: 60
+  shot_seconds: 6
+  max_shots: 8
+  # 无 Skill 命中时的兜底质感,保持中性;科普成片建议走 science-doc Skill。
+  style: "写实电影质感,光线与色调全片统一,画面里不要出现文字、字幕或水印"
+  # 需要登录态或代理才能取到字幕时再填。
+  cookies_file: null
+  proxy: null
+
+# 平台能力注册表:除 H3 视频(modes)之外的本地生成能力,提交走 POST /v1/jobs。
+# 全部在本机执行,不经过任何云端 API。按需取消注释并改成你机器上的真实配置。
+capabilities: {}
+#   flux-t2i:
+#     kind: t2i
+#     workflow_file: "./workflows/flux_t2i.json"   # ComfyUI Export (API) 格式
+#     inputs:
+#       prompt: ["6.text"]
+#       width: ["5.width"]
+#       height: ["5.height"]
+#       seed: ["25.noise_seed"]
+#     needs_gpu: true    # 和 H3 渲染共享同一张卡,轮流进 GPU
+#   local-tts:
+#     kind: tts
+#     # 本地命令模板,{text_file} 是解说词文本,{output_file} 是产出音频。
+#     command: ["python", "tts.py", "--input", "{text_file}", "--output", "{output_file}"]
+#     output_suffix: ".wav"
+#     timeout_seconds: 600
+#     needs_gpu: false
+
+# 外部 Agent worker(可选):把 Claude Code / Codex CLI 当云端推理层用,
+# 通过统一的 AgentManager 调用(videogen_service/agents/)。工作台对话里
+# 选中云端 Agent 后,它驱动和本地大脑相同的工具循环,能直接排任务;
+# 工具由本服务执行,CLI 保持只读沙箱。没配置时这一层不存在,平台照常
+# 只用本机模型。CLI 要自己先装好并登录(claude / codex)。
+agents: {}
+#   claude:
+#     enabled: true
+#     command: claude          # 也可以是列表,如 ["npx", "claude"]
+#     args: []                 # 追加的 CLI 参数,如 ["--allowedTools", "Edit"]
+#     timeout_seconds: 300     # 每次调用的硬超时(section: 不允许挂死)
+#     working_dir: null        # CLI 的工作目录;留空 = work/.agents/workspace
+#   codex:
+#     enabled: true
+#     command: codex
+#     args: []                 # 如 ["--sandbox", "workspace-write"] 放开写权限
+#     timeout_seconds: 300
+#     working_dir: null
+
+# 谁先上、失败了谁接手(run_with_fallback 不点名时用这条链)。
+agent_defaults:
+  primary: claude
+  fallback: ["codex"]
 
 modes:
   t2v:
@@ -59,3 +130,16 @@ modes:
       length: ["5.total_frames"]
       seed: ["5.seed"]
       timeline: ["5.timeline_data"]
+  # r2v:
+  #   # 参考主体生视频:参考图锁角色/物体身份,提示词用 <Picture 1> 引用。
+  #   # 需要 ref2va 权重(Comfy-Org/MiniMax-H3 的
+  #   # minimax_h3_ref2va_pruned_int8_convrot.safetensors, 约 21GB)。
+  #   workflow_file: "./workflows/minimax_h3_r2v.json"
+  #   accepts_refs: true
+  #   inputs:
+  #     prompt: ["5.global_prompt"]
+  #     width: ["5.width"]
+  #     height: ["5.height"]
+  #     length: ["5.total_frames"]
+  #     seed: ["5.seed"]
+  #     timeline: ["5.timeline_data"]

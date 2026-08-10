@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>工作台 · VideoTube Videogen</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%237c5cff'/><path d='M6 4.5l5 3.5-5 3.5z' fill='white'/></svg>">
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <div class="ws-shell">
+      <aside class="ws-side" aria-label="项目与素材">
+        <div class="brand">
+          <span class="brand-name">VideoTube Videogen</span>
+          <span class="brand-sub">本地创作工作台</span>
+        </div>
+        <nav class="sidebar-nav">
+          <a href="/workspace" aria-current="page">工作台</a>
+          <a href="/">生成台（手动）</a>
+        </nav>
+
+        <section class="ws-panel">
+          <h3>项目</h3>
+          <div class="project-row">
+            <select id="ws-project" class="field-input">
+              <option value="">未选项目</option>
+            </select>
+            <button type="button" id="ws-project-new" class="button button-secondary">新建</button>
+          </div>
+          <p class="subtle" id="ws-project-info"></p>
+        </section>
+
+        <section class="ws-panel">
+          <h3>Skill</h3>
+          <ul class="ws-list" id="ws-skills"><li class="subtle">加载中…</li></ul>
+        </section>
+
+        <section class="ws-panel">
+          <h3>资产中心</h3>
+          <div class="ws-asset-grid" id="ws-assets"></div>
+          <p class="subtle" id="ws-assets-empty" hidden>还没有资产；生成台可以上传，Agent 也能把产物存进来。</p>
+        </section>
+
+        <div class="sidebar-footer">
+          <span class="health-pill" data-health-service>检测中…</span>
+          <span class="health-pill" data-health-script>字幕总结 …</span>
+        </div>
+      </aside>
+
+      <main class="ws-main" aria-label="产物">
+        <header class="ws-main-head">
+          <h1>产物</h1>
+          <span class="subtle" id="ws-outputs-hint"></span>
+        </header>
+        <div id="ws-outputs" class="media-grid ws-outputs">
+          <div class="empty">还没有产物。右边告诉 Agent 你想做什么。</div>
+        </div>
+      </main>
+
+      <aside class="ws-chat" aria-label="Agent 对话">
+        <div class="ws-chat-head">
+          <select id="ws-chat-select" class="field-input">
+            <option value="">选择对话…</option>
+          </select>
+          <button type="button" id="ws-chat-new" class="button button-secondary">新对话</button>
+        </div>
+        <div class="ws-agent-row">
+          <label class="subtle" for="ws-agent">回答者</label>
+          <select id="ws-agent" class="field-input">
+            <option value="">本地 Agent（能排任务）</option>
+          </select>
+        </div>
+        <div class="ws-messages" id="ws-messages">
+          <div class="empty">新建一个对话开始创作。Agent 会写分镜、排图片/视频/配音任务，全在本机执行。</div>
+        </div>
+        <div class="ws-composer">
+          <textarea id="ws-input" rows="3"
+            placeholder="告诉 Agent 你想做什么，比如：帮我做一条 60 秒的宠物屋测评短片"></textarea>
+          <button type="button" id="ws-send" class="button button-primary">发送</button>
+        </div>
+      </aside>
+    </div>
+
+    <script src="/static/ui.js"></script>
+    <script src="/static/workspace.js"></script>
+  </body>
+</html>
