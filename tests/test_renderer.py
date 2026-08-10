@@ -198,6 +198,52 @@ def test_reference_validation_gates_by_mode() -> None:
     assert accepted.timeline_mode
 
 
+def test_segment_refs_ride_into_every_segment() -> None:
+    board = parse_storyboard("[0s-6s] 甲\n[6s-12s] 乙", default_seconds=6)
+    timeline = build_timeline(
+        board,
+        config=project_config(),
+        width=864,
+        height=480,
+        segment_refs_b64=["U1RZTEU="],
+    )
+    for segment in timeline["segments"]:
+        assert segment["refs"] == [{"index": 0, "imageB64": "U1RZTEU="}]
+    # 每段拿到独立的字典,改一段不串味。
+    timeline["segments"][0]["refs"][0]["imageB64"] = "X"
+    assert timeline["segments"][1]["refs"][0]["imageB64"] == "U1RZTEU="
+    # 段级参考不动 global.refs(那是 r2v 身份锚点的位置)。
+    assert timeline["global"]["refs"] == []
+
+
+def test_segment_reference_validation_gates() -> None:
+    config = project_config()
+    with pytest.raises(RenderError, match="只在分镜模式"):
+        validate_render(
+            request(mode="t2v", prompt="a", seconds=6),
+            config=config,
+            has_first_frame=False,
+            has_last_frame=False,
+            segment_ref_count=1,
+        )
+    with pytest.raises(RenderError, match="段级参考图最多"):
+        validate_render(
+            request(mode="story", prompt="[0s-6s] a"),
+            config=config,
+            has_first_frame=False,
+            has_last_frame=False,
+            segment_ref_count=10,
+        )
+    accepted = validate_render(
+        request(mode="story", prompt="[0s-6s] a"),
+        config=config,
+        has_first_frame=False,
+        has_last_frame=False,
+        segment_ref_count=2,
+    )
+    assert accepted.timeline_mode
+
+
 def test_anchored_timeline_switches_to_gen_image_mode() -> None:
     board = parse_storyboard("风格\n[0s-6s续] 接着跑", default_seconds=5)
     timeline = build_timeline(

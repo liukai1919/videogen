@@ -196,6 +196,7 @@ def validate_render(
     has_first_frame: bool,
     has_last_frame: bool,
     ref_count: int = 0,
+    segment_ref_count: int = 0,
 ) -> RenderValidation:
     mode_settings = config.modes.get(request.mode)
     if mode_settings is None:
@@ -207,6 +208,13 @@ def validate_render(
     if ref_count > MAX_REFERENCE_IMAGES:
         raise RenderError(f"参考图最多 {MAX_REFERENCE_IMAGES} 张,给了 {ref_count} 张")
     timeline_mode = is_timeline_mode(mode_settings)
+    if segment_ref_count:
+        if not timeline_mode:
+            raise RenderError("段级参考图(segment_refs)只在分镜模式下生效")
+        if segment_ref_count > MAX_REFERENCE_IMAGES:
+            raise RenderError(
+                f"段级参考图最多 {MAX_REFERENCE_IMAGES} 张,给了 {segment_ref_count} 张"
+            )
     if timeline_mode:
         if has_first_frame or has_last_frame:
             raise RenderError("分镜模式不接首尾帧,请用图生视频或首尾帧模式")
@@ -370,16 +378,23 @@ def build_timeline(
     height: int,
     anchor_b64: str | None = None,
     refs_b64: list[str] | None = None,
+    segment_refs_b64: list[str] | None = None,
     task_type: str = "",
 ) -> dict[str, Any]:
     """anchor_b64 是上一块最后一帧的 base64 PNG:整块转成 gen_image 模式,
     首段(接力块只有一段)以它为 i2v 锚点,画面从这一帧无缝接着演。
     refs_b64 是 r2v 的参考图(身份锚点),挂在 global.refs 上,slot 顺序
     对应提示词里的 <Picture 1>…<Picture N>;task_type 覆盖全局任务类型
-    (r2v 模式传 "r2v")。"""
+    (r2v 模式传 "r2v")。segment_refs_b64 挂到每一段自己的 refs 上
+    (segment editMode 下段不继承 global.refs),节点会自动给段提示词
+    加 <Picture N> 前缀——全片风格钥匙就走这条通道。"""
     fps = config.renderer.fps
     frames = storyboard_frames(board, fps=fps)
     long_edge = max(width, height)
+    segment_refs = [
+        {"index": index, "imageB64": image}
+        for index, image in enumerate(segment_refs_b64 or [])
+    ]
     segments: list[dict[str, Any]] = []
     start = 0
     for index, (shot, length) in enumerate(zip(board.shots, frames, strict=True)):
@@ -390,7 +405,7 @@ def build_timeline(
             "frameCount": length,
             "prompt": shot_prompt(board, shot),
             "taskType": "",
-            "refs": [],
+            "refs": [dict(ref) for ref in segment_refs],
             "negativePrompt": "",
         }
         if anchor_b64 is not None and index == 0:
@@ -461,6 +476,7 @@ def timeline_values(
     seed: int,
     anchor_b64: str | None = None,
     refs_b64: list[str] | None = None,
+    segment_refs_b64: list[str] | None = None,
     task_type: str = "",
 ) -> dict[str, Any]:
     """Workflow values for one Director job over `board` — the whole storyboard
@@ -477,6 +493,7 @@ def timeline_values(
         height=height,
         anchor_b64=anchor_b64,
         refs_b64=refs_b64,
+        segment_refs_b64=segment_refs_b64,
         task_type=task_type,
     )
     return {
@@ -544,6 +561,7 @@ class H3Renderer:
             has_first_frame=request.first_frame is not None,
             has_last_frame=request.last_frame is not None,
             ref_count=len(request.refs),
+            segment_ref_count=len(request.segment_refs),
         )
         # 超过单条安全包络的分镜拆成多块串行渲染再拼接;单块走原路。
         plans: list[ChunkPlan] = []
@@ -553,6 +571,8 @@ class H3Renderer:
         passes = sum(len(plan.board.shots) for plan in plans) or 1
         # r2v 的参考图对每一块都全程生效:身份锚点不随分块变化。
         refs_b64 = [_encode_ref(path) for path in request.refs]
+        # 段级参考图(风格钥匙等)同样贯穿每一块的每一段。
+        segment_refs_b64 = [_encode_ref(path) for path in request.segment_refs]
         chunk_task = "r2v" if mode_settings.accepts_refs else ""
         if config.ollama.unload_before_render:
             # 卸载会打断正在生成的聊天/编剧调用;先等大脑歇口气再动手。
@@ -612,6 +632,7 @@ class H3Renderer:
                             seed=base_seed + index,
                             anchor_b64=anchor,
                             refs_b64=refs_b64,
+                            segment_refs_b64=segment_refs_b64,
                             task_type=chunk_task,
                         ),
                     )

@@ -42,6 +42,9 @@ class RenderRequest(RenderSpec):
     last_frame: Path | None = None
     # r2v 的参考图(身份锚点),按序对应提示词里的 <Picture 1>…<Picture N>。
     refs: list[Path] = Field(default_factory=list)
+    # 挂到分镜每一段的参考图(如全片风格钥匙):注入 timeline 段级 refs,
+    # Director 节点会自动给段提示词加 <Picture N> 前缀。
+    segment_refs: list[Path] = Field(default_factory=list)
 
 
 class RenderProgress(StrictModel):

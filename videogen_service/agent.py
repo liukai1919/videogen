@@ -386,6 +386,13 @@ class ToolBox:
                         "参考图锁定角色/物体身份,提示词里按序用"
                         " <Picture 1>…<Picture N> 引用",
                     },
+                    "segment_ref_assets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "资产 id 列表(≤9),挂到 story 分镜每一段的"
+                        "参考图(如全片风格钥匙,锁色调质感);仅分镜模式,"
+                        "段提示词无需手写引用",
+                    },
                 },
                 ["mode", "prompt"],
             ),
@@ -397,6 +404,12 @@ class ToolBox:
                     "idea": {**text, "description": "想法、主题或资料原文"},
                     "target_seconds": {"type": "number"},
                     "skill": {**text, "description": "套用的 Skill id,可省略"},
+                    "style": {
+                        **text,
+                        "description": "整体质感/氛围一句话(如\"电影感雨夜霓虹,"
+                        "冷暖对比\");没有 Skill 命中又有明确气质时必填,"
+                        "省略则用中性电影感兜底",
+                    },
                 },
                 ["idea"],
             ),
@@ -554,11 +567,20 @@ class ToolBox:
             for asset_id in (raw_refs if isinstance(raw_refs, list) else [])
             if (frame := self._asset_frame(asset_id)) is not None
         ]
+        raw_segment_refs = arguments.get("segment_ref_assets")
+        segment_refs = [
+            frame
+            for asset_id in (
+                raw_segment_refs if isinstance(raw_segment_refs, list) else []
+            )
+            if (frame := self._asset_frame(asset_id)) is not None
+        ]
         view = self._renders.submit(
             spec,
             first_frame=self._asset_frame(arguments.get("first_frame_asset")),
             last_frame=self._asset_frame(arguments.get("last_frame_asset")),
             refs=refs or None,
+            segment_refs=segment_refs or None,
         )
         return {"render_id": view.render_id, "status": view.status}
 
@@ -606,6 +628,8 @@ class ToolBox:
             options_payload["target_seconds"] = float(arguments["target_seconds"])
         if arguments.get("skill"):
             options_payload["skill"] = str(arguments["skill"])
+        if arguments.get("style"):
+            options_payload["style"] = str(arguments["style"])
         result = self._studio.create_from_document(
             ScriptOptions.model_validate(options_payload),
             filename="idea.txt",

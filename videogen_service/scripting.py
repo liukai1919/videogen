@@ -413,8 +413,10 @@ def _compose_summary_prompt(
         "   氛围色调)。不要写字幕、文字、水印、台标或真实人物姓名。",
         "7. 同一角色或场景出现在多个分镜时,每次都用同一组关键词描述它的外观、",
         "   服装、色调:各分镜是独立渲染的,描述一变角色就会变样。",
-        "   若该镜是上一镜同一动作的直接延续(画面要无缝接着演),把 continues",
-        "   设为 true;切换场景、时间或视角就保持 false,第一镜必须 false。",
+        "   continues 的判据:同一主体在做同一件事、镜头要不剪断地跟下去",
+        "   (奔跑接着跑进门、抬手接着推开窗、一个动作的前半和后半),这一镜",
+        "   就必须 continues: true——漏标动作就会在镜头切换处断裂重来。",
+        "   跳时间、换地点、换机位视角、换主体,才保持 false;第一镜必须 false。",
         "8. 每个分镜的 sound 是这一镜的环境音和动作音,一句,写具体的声音",
         "   (如\"雨点敲打金属棚顶,远处闷雷\"),视频模型会真的生成它们;",
         "   不需要就给空字符串。",
@@ -510,7 +512,16 @@ def _fit_shots(
         # budget has to be checked against the padded duration, not the ask.
         padded = align_length_frames(seconds, fps=renderer.fps) / renderer.fps
         if shots and total_seconds + padded > budget:
-            break
+            # 量化把每镜垫长约一成,严格不许超预算就永远丢最后一镜,
+            # 片长系统性偏短(R2 实测 30→26.3、24→19.75)。就近适配:
+            # 超一点若比缺一镜更接近目标就收下;硬上限永不越。
+            overshoot = (total_seconds + padded) - budget
+            undershoot = budget - total_seconds
+            if (
+                overshoot >= undershoot
+                or total_seconds + padded > renderer.max_total_seconds
+            ):
+                break
         total_seconds += padded
         shots.append(
             ScriptShot(

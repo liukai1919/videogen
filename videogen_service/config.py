@@ -63,8 +63,10 @@ class ScriptConfig(StrictModel):
     target_seconds: float = Field(default=60, gt=0)
     shot_seconds: float = Field(default=6, gt=0)
     max_shots: int = Field(default=8, gt=0)
+    # 中性电影感兜底:题材气质由 Skill 或请求的 style 供给,这里不预设
+    # 题材(科普质感曾作为默认漏进氛围片,R2 S9 记档)。
     style: str = (
-        "写实科普纪录片质感,柔和自然光,镜头稳定,画面里不要出现文字、字幕或水印"
+        "写实电影质感,光线与色调全片统一,画面里不要出现文字、字幕或水印"
     )
     cookies_file: Path | None = None
     proxy: str | None = None

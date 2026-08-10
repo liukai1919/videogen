@@ -161,6 +161,31 @@ def test_the_shot_list_is_cut_to_the_requested_budget() -> None:
     assert result.seconds <= 20
 
 
+def test_the_final_shot_survives_quantization_overshoot() -> None:
+    # 目标 30、六秒镜头:H3 量化把每镜垫到 6.583s,5 镜共 32.9s。旧裁剪
+    # 一律砍到 4 镜(26.3s)——R2 记档的"片长偏短八成"病根;就近适配应
+    # 保留第 5 镜,超 2.9s 比缺 3.7s 更接近目标。
+    result = studio(draft(*[(6, f"第{index}镜") for index in range(5)])).create(
+        ScriptRequest(url="https://youtu.be/dQw4w9WgXcQ", target_seconds=30)
+    )
+
+    assert len(result.shots) == 5
+    assert result.seconds > 30
+
+
+def test_closest_fit_never_exceeds_the_hard_cap() -> None:
+    # 目标顶到 120s 硬上限:第 8 个 15s 镜头哪怕更接近目标(超 0.7s vs
+    # 缺 14.4s)也不许越界——上限是 OOM 红线,不是软预算。
+    config = project_config()
+    result = studio(draft(*[(15, f"第{index}镜") for index in range(9)])).create(
+        ScriptRequest(
+            url="https://youtu.be/dQw4w9WgXcQ", target_seconds=120, max_shots=12
+        )
+    )
+
+    assert result.seconds <= config.renderer.max_total_seconds
+
+
 def test_a_long_transcript_is_truncated_instead_of_flooding_the_model() -> None:
     result = studio(
         draft((6, "航拍晴朗天空")), source=transcript(text="字" * 40_000)

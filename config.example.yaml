@@ -42,7 +42,8 @@ script:
   target_seconds: 60
   shot_seconds: 6
   max_shots: 8
-  style: "写实科普纪录片质感,柔和自然光,镜头稳定,画面里不要出现文字、字幕或水印"
+  # 无 Skill 命中时的兜底质感,保持中性;科普成片建议走 science-doc Skill。
+  style: "写实电影质感,光线与色调全片统一,画面里不要出现文字、字幕或水印"
   # 需要登录态或代理才能取到字幕时再填。
   cookies_file: null
   proxy: null

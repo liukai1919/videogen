@@ -340,6 +340,45 @@ def test_r2v_reference_render_carries_asset_images(tmp_path: Path) -> None:
     assert [Path(ref).name for ref in stored["refs"]] == ["ref0.png"]
 
 
+def test_story_render_carries_segment_ref_assets(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    asset = AssetStore(config.work_dir).create(
+        name="风格钥匙", category="风格", filename="style.png", data=b"PNG"
+    )
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
+                        {
+                            "mode": "story",
+                            "prompt": "[0s-6s] 山谷\n[6s-12s] 峰顶",
+                            "segment_ref_assets": [asset.asset_id],
+                        },
+                    )
+                ],
+            },
+            {"content": "带风格钥匙的渲染排上了。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "全片锁一个风格"}
+        ).json()
+        video = json.loads(record["messages"][2]["content"])
+        assert video.get("error") is None and video["render_id"]
+
+    stored = json.loads(
+        (config.work_dir / video["render_id"] / "request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [Path(ref).name for ref in stored["segment_refs"]] == ["segref0.png"]
+
+
 def test_a_broken_tool_reports_instead_of_crashing(tmp_path: Path) -> None:
     chat = ScriptedChat(
         [
@@ -487,6 +526,46 @@ def test_read_skill_reference_reports_unknowns_readably(tmp_path: Path) -> None:
     result = json.loads(record["messages"][2]["content"])
     assert "nope.md" in result["error"]
     assert "beat.md" in result["error"]
+
+
+def test_write_storyboard_forwards_style(tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingStudio(StubStudio):
+        def create_from_document(
+            self, options: Any, *, filename: str, text: str
+        ) -> ScriptResult:
+            captured["style"] = options.style
+            return super().create_from_document(
+                options, filename=filename, text=text
+            )
+
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "write_storyboard",
+                        {"idea": "雨夜霓虹下的流浪猫", "style": "电影感雨夜霓虹,冷暖对比"},
+                    )
+                ],
+            },
+            {"content": "分镜好了。"},
+        ]
+    )
+    app = create_app(
+        make_config(tmp_path),
+        renderer=FakeRenderer(),
+        studio=CapturingStudio(),
+        job_runner=FakeRunner(),
+        chat_client=chat,
+    )
+    with TestClient(app) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        client.post(f"/v1/chats/{chat_id}/messages", json={"text": "做条氛围片"})
+
+    assert captured["style"] == "电影感雨夜霓虹,冷暖对比"
 
 
 def test_h3_prompt_rules_ride_in_prompt_and_tool_descriptions(
