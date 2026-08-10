@@ -42,6 +42,10 @@
   与块长无清晰相关）。头号嫌疑：2026-08-09 config 试开的 Director 跨段前缀帧
   （注释自述"显存吃紧的机器先默认关"）。需关闭对照跑 A/B 轮后定夺——DECISIONS
   候选，数据未够不入账。
+  **更正（2026-08-10 源码核查，见 docs/continuity-prefix-frames.md）：**
+  `continuous_reference` 是双重空转（写错键 + 真开关对 t2v 段不生效），
+  前缀帧从未进入任何渲染，崩溃与它无关；当晚最终战绩 story 3 成 7 崩。
+  真凶转向宿主侧 ComfyUI 进程问题，已挂独立排查任务。
 - R1 全局 — **渲染抢占杀死聊天轮**：块边界 unload_before_render 会中止正在生成的
   agent 回复，该轮不落盘、不写日志、客户端超时（S2b 首发整轮丢失实测）。渲染
   期间聊天轮延迟 >9min。修复卡 task_ec91f9a5。

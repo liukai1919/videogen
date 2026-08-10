@@ -15,9 +15,9 @@ renderer:
   max_seconds: 15.0
   max_total_seconds: 120.0
   max_shots: 12
-  # story 跨段连贯:Director 节点把上一段尾帧和外观参考自动带进下一段,
-  # 角色/场景跨段一致的工程解。代价是每段画布多前缀帧,显存吃紧的机器
-  # 保持 false。
+  # 2026-08-10 核查为空转开关:节点只在 ads2v 消费该键,对 story 的
+  # t2v/gen_blank 段无效;保持 false。跨块一致性由帧接力(续标记)+
+  # r2v 定妆承担,详见 docs/continuity-prefix-frames.md。
   continuous_reference: false
 
 ollama:
