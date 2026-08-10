@@ -50,6 +50,7 @@ from videogen_service.service import (
     RenderNotFound,
     RenderService,
 )
+from videogen_service.skills import SkillLibrary
 
 _LOGGER = logging.getLogger("videogen_service.agent")
 _CHAT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -292,6 +293,7 @@ class ToolBox:
         studio: ScriptStudio,
         assets: AssetStore,
         memory: MemoryStore,
+        skills: SkillLibrary | None = None,
     ) -> None:
         self._config = config
         self._renders = renders
@@ -299,6 +301,7 @@ class ToolBox:
         self._studio = studio
         self._assets = assets
         self._memory = memory
+        self._skills = skills or SkillLibrary(config.skills_dir)
 
     def definitions(self) -> list[dict[str, Any]]:
         def tool(
@@ -352,6 +355,9 @@ class ToolBox:
                 "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴,总时长可到 "
                 f"{self._config.renderer.max_total_seconds:g} 秒(内部自动拆成 ≤"
                 f"{self._config.renderer.max_seconds:g} 秒的块串行渲染);"
+                "story 时间轴的每一段都必须在 "
+                f"{self._config.renderer.min_seconds:g}-"
+                f"{self._config.renderer.max_seconds:g} 秒之间,太短的镜头合并进相邻段。"
                 "图生视频用 i2v 并给 first_frame_asset。"
                 "本机分辨率上限 864x480,其他模式单条 ≤"
                 f"{self._config.renderer.max_seconds:g} 秒,超限直接报错。",
@@ -428,6 +434,16 @@ class ToolBox:
                 [],
             ),
             tool(
+                "read_skill_reference",
+                "读取某个创作 Skill 的一份参考文档全文;系统提示的技能表里"
+                "列出了每个 Skill 有哪些参考文档,按需读,别全读。",
+                {
+                    "skill_id": {**text, "description": "Skill id"},
+                    "name": {**text, "description": "参考文档文件名,如 shot-rules.md"},
+                },
+                ["skill_id", "name"],
+            ),
+            tool(
                 "save_memory",
                 "用户明确要求记住某个长期偏好时调用;不要自作主张。",
                 {"text": {**text, "description": "偏好原文"}},
@@ -447,6 +463,7 @@ class ToolBox:
             "check_render": self._check_render,
             "inspect_failure": self._inspect_failure,
             "list_assets": self._list_assets,
+            "read_skill_reference": self._read_skill_reference,
             "save_memory": self._save_memory,
         }
         handler = handlers.get(name)
@@ -683,6 +700,50 @@ class ToolBox:
             ]
         }
 
+    def _read_skill_reference(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        skill_id = str(arguments.get("skill_id") or "").strip()
+        name = str(arguments.get("name") or "").strip()
+        skill = self._skills.get(skill_id)
+        if skill is None:
+            known = [entry.skill_id for entry in self._skills.list()]
+            return {"error": f"没有这个 Skill: {skill_id};可用: {known}"}
+        content = self._skills.read_reference(skill_id, name)
+        if content is None:
+            return {
+                "error": f"Skill {skill_id} 没有参考文档 {name};"
+                f"可用: {skill.references or '(无)'}"
+            }
+        return {"skill_id": skill_id, "name": name, "content": content}
+
+    def skill_prompt_lines(self) -> list[str]:
+        """The routing table injected into the system prompt: just enough to
+        pick a skill id — full SKILL.md text only enters the storyboard
+        prompt after a skill is actually selected."""
+        skills = self._skills.list()
+        if not skills:
+            return []
+        lines = [
+            "",
+            "可用的创作 Skill——用户需求命中哪个,就把它的 id 传给",
+            "write_storyboard 的 skill 参数(风格、节奏等缺省会自动带上,",
+            "用户明说的值仍然优先);拿不准就不传:",
+        ]
+        for skill in skills:
+            meta = skill.meta
+            parts = [f"- {skill.skill_id}「{meta.name}」:{meta.description}"]
+            if meta.use_when:
+                parts.append("适用:" + "、".join(meta.use_when))
+            if meta.not_for:
+                parts.append("不适用:" + "、".join(meta.not_for))
+            if skill.references:
+                parts.append("参考文档:" + "、".join(skill.references))
+            lines.append(" ".join(parts))
+        if any(skill.references for skill in skills):
+            lines.append(
+                "需要某 Skill 的细则时用 read_skill_reference(skill_id, name) 按需读。"
+            )
+        return lines
+
     def _save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entry = self._memory.add(str(arguments["text"]))
         return {"entry_id": entry.entry_id, "text": entry.text}
@@ -877,8 +938,9 @@ class AgentService:
             "你是一个本地视频创作平台的 Agent;所有生成(视频/图片/配音)都在",
             "用户这台电脑上用本机模型完成,你负责规划并调用平台工具。",
             "你可以写分镜脚本、排图片/配音任务、排 H3 视频渲染、查看资产。",
-            "生成类工具只是排队,立即返回任务 id;告诉用户 id,别谎称已完成,",
-            "用户追问进度时用 check_job/check_render 查。",
+            "生成类工具只是排队,立即返回任务 id;把 id 告诉用户后就结束这一轮,",
+            "别谎称已完成。同一轮里最多查一次进度确认任务已开始,不要反复",
+            "check_job/check_render 空转等它完成——用户追问进度时再查。",
             "任务失败时先用 inspect_failure 拿诊断上下文(报错、参数、",
             "ComfyUI 状态),分析原因并给出具体修复步骤。",
             "先弄清需求再动手;大的创作先给方案,用户点头再排任务。",
@@ -900,12 +962,17 @@ class AgentService:
             "H3 会原生生成音频:段内可写\"音效:具体声音\"(如雨声、金属剐蹭),",
             "开头无时间戳的全局行可写\"配乐:配器/速度/节奏\";写了才有指挥,",
             "不写模型就自己瞎配。",
+            "角色开口说话时,台词用官方对白语法写进对应段落:",
+            "(S1)<d>[Chinese] 台词</d> —— S1 是说话人编号,第二个角色用 S2,",
+            "语言标签用英文名(中文就是 Chinese),模型会原生配音并对口型。",
+            "旁白解说不用对白语法:解说走 compose_video 的字幕或配音轨。",
             "某一镜是上一镜同一动作的无缝延续时,时间轴写成 [12s-18s续]:",
             "跨块渲染会用上一镜的最后一帧接力,动作不断线;场景切换别标。",
             "角色要跨条锁脸时用 r2v 模式:ref_assets 给资产中心的定妆图 id,",
             "提示词里按序用 <Picture 1> 引用它(如\"<Picture 1> 中的红衣女子",
             "走进咖啡馆\");首次出现描述一次外观,之后只用标签。",
         ]
+        lines += self._toolbox.skill_prompt_lines()
         preferences = self._memory.texts()
         if preferences:
             lines += ["", "用户的长期偏好:"]

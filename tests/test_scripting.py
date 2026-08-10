@@ -259,3 +259,59 @@ def test_json3_appended_events_are_dropped() -> None:
     )
 
     assert parse_json3(payload) == "阳光散射 天空变蓝"
+
+
+def _fake_ollama_response(payload: dict) -> object:
+    class _Response:
+        def read(self) -> bytes:
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    return _Response()
+
+
+def _summarizer():
+    # OllamaSummarizer 只读这几个属性,鸭子类型即可,不用搭全量配置。
+    from types import SimpleNamespace
+
+    from videogen_service.scripting import OllamaSummarizer
+
+    config = SimpleNamespace(
+        ollama=SimpleNamespace(base_url="http://127.0.0.1:11434", model="qwen"),
+        script=SimpleNamespace(model=None, temperature=0.4, timeout_seconds=5),
+    )
+    return OllamaSummarizer(config)  # type: ignore[arg-type]
+
+
+def test_empty_response_falls_back_to_thinking(monkeypatch) -> None:
+    # 思考型模型 + format=json:整段 JSON 落在 thinking,response 为空
+    # (R1 评测 11/11 实锤);summarize 必须捞回 thinking 里的正文。
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _fake_ollama_response(
+            {"response": "", "thinking": '{"ok": true}'}
+        ),
+    )
+    assert _summarizer().summarize("提示词") == '{"ok": true}'
+
+
+def test_truly_empty_answer_still_raises(monkeypatch) -> None:
+    from videogen_service.scripting import ScriptUnavailable
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _fake_ollama_response(
+            {"response": "", "thinking": ""}
+        ),
+    )
+    try:
+        _summarizer().summarize("提示词")
+    except ScriptUnavailable as error:
+        assert "没有返回内容" in str(error)
+    else:
+        raise AssertionError("空响应应该抛 ScriptUnavailable")

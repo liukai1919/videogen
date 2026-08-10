@@ -143,6 +143,7 @@ def create_app(
             studio=workshop,
             assets=assets,
             memory=memory,
+            skills=skills,
         ),
         client=chat_client,
         memory=memory,
@@ -232,6 +233,10 @@ def create_app(
                 "name": skill.meta.name,
                 "description": skill.meta.description,
                 "category": skill.meta.category,
+                "version": skill.meta.version,
+                "use_when": skill.meta.use_when,
+                "not_for": skill.meta.not_for,
+                "references": skill.references,
                 "defaults": skill.meta.defaults.model_dump(exclude_none=True),
             }
             for skill in skills.list()

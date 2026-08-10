@@ -231,6 +231,10 @@ def test_the_skill_list_is_served(tmp_path: Path) -> None:
             "name": "科普纪录片",
             "description": "测试用规范",
             "category": "纪录片",
+            "version": "",
+            "use_when": [],
+            "not_for": [],
+            "references": [],
             "defaults": {"style": "手绘水彩插画风", "shot_seconds": 7.0},
         }
     ]

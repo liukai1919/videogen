@@ -101,9 +101,21 @@ class OllamaSummarizer:
         except json.JSONDecodeError as error:
             raise ScriptUnavailable("Ollama 的响应不是 JSON") from error
         text = document.get("response") if isinstance(document, dict) else None
-        if not isinstance(text, str) or not text.strip():
-            raise ScriptUnavailable("Ollama 没有返回内容")
-        return text
+        if isinstance(text, str) and text.strip():
+            return text
+        # 思考型模型(如 qwen3.6)在 /api/generate + format=json 下会把整段
+        # JSON 写进 thinking 而让 response 落空——约束解码的产物就在那里,
+        # 拿来即用;R1 评测实测 11/11 次命中此路径。
+        thinking = document.get("thinking") if isinstance(document, dict) else None
+        if isinstance(thinking, str) and thinking.strip():
+            _LOGGER.warning(
+                "Ollama(%s) response 为空,回退采用 thinking 字段(%d 字)",
+                self._model,
+                len(thinking),
+            )
+            return thinking
+        _LOGGER.warning("Ollama(%s) 没有返回内容", self._model)
+        raise ScriptUnavailable("Ollama 没有返回内容")
 
 
 class _DraftShot(BaseModel):

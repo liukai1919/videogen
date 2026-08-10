@@ -389,3 +389,121 @@ def test_memory_preferences_ride_in_the_system_prompt(tmp_path: Path) -> None:
         chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
         client.post(f"/v1/chats/{chat_id}/messages", json={"text": "在吗"})
     assert "旁白都用口语" in chat.requests[0][0]["content"]
+
+
+def write_routed_skill(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "concept-trailer"
+    (skill_dir / "references").mkdir(parents=True)
+    (skill_dir / "meta.yaml").write_text(
+        "\n".join(
+            [
+                "name: 概念预告片",
+                "description: 电影级预告片质感",
+                "use_when:",
+                "  - 概念预告片、片花",
+                "not_for:",
+                "  - 科普内容(用 science-doc)",
+                "defaults:",
+                "  shot_seconds: 5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "- 三段式节奏;节拍细则见 references/beat.md", encoding="utf-8"
+    )
+    (skill_dir / "references" / "beat.md").write_text(
+        "开场一镜定调,中段冲突升级。", encoding="utf-8"
+    )
+
+
+def test_skill_routing_table_rides_in_the_system_prompt(tmp_path: Path) -> None:
+    write_routed_skill(tmp_path)
+    chat = ScriptedChat([{"content": "好的。"}])
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        client.post(f"/v1/chats/{chat_id}/messages", json={"text": "在吗"})
+
+    system = chat.requests[0][0]["content"]
+    # 路由表:id、触发条件、边界、参考文档名都在;全文不在(两级注入)。
+    assert "concept-trailer" in system
+    assert "概念预告片、片花" in system
+    assert "科普内容(用 science-doc)" in system
+    assert "beat.md" in system
+    assert "三段式节奏" not in system
+
+
+def test_read_skill_reference_tool_round_trips(tmp_path: Path) -> None:
+    write_routed_skill(tmp_path)
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "read_skill_reference",
+                        {"skill_id": "concept-trailer", "name": "beat.md"},
+                    )
+                ],
+            },
+            {"content": "细则已读。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "做个预告片"}
+        ).json()
+
+    names = [tool["function"]["name"] for tool in chat.tools_seen[0]]
+    assert "read_skill_reference" in names
+    result = json.loads(record["messages"][2]["content"])
+    assert result["content"] == "开场一镜定调,中段冲突升级。"
+
+
+def test_read_skill_reference_reports_unknowns_readably(tmp_path: Path) -> None:
+    write_routed_skill(tmp_path)
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "read_skill_reference",
+                        {"skill_id": "concept-trailer", "name": "nope.md"},
+                    )
+                ],
+            },
+            {"content": "没有这份文档。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "读细则"}
+        ).json()
+
+    result = json.loads(record["messages"][2]["content"])
+    assert "nope.md" in result["error"]
+    assert "beat.md" in result["error"]
+
+
+def test_h3_prompt_rules_ride_in_prompt_and_tool_descriptions(
+    tmp_path: Path,
+) -> None:
+    chat = ScriptedChat([{"content": "好的。"}])
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        client.post(f"/v1/chats/{chat_id}/messages", json={"text": "在吗"})
+
+    system = chat.requests[0][0]["content"]
+    # H3 官方对白语法与轮询纪律都写进了系统提示(R1 的 S10/S1 缺口)。
+    assert "<d>[Chinese] 台词</d>" in system
+    assert "最多查一次进度" in system
+    video = next(
+        tool
+        for tool in chat.tools_seen[0]
+        if tool["function"]["name"] == "generate_video"
+    )
+    # story 每段时长界限进了工具描述(R1 三次踩坑的服务端拦截,前移到这里)。
+    assert "5-15 秒之间" in video["function"]["description"]
