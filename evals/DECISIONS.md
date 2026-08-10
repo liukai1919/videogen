@@ -60,6 +60,17 @@
 - **推翻条件**：不推翻本默认；外部 worker 需要阻塞语义时**新增** wait 类工具
   解决（对标计划 M3.4），不改对话内行为。
 
+## D8 · WSL 内存上限 40GB（32GB 已被证伪，52GB 亦被证伪）
+
+- **结论**：`.wslconfig` `memory=40GB` + `swap=16GB`。上下都有尸体：52GB 时
+  WSL 吃到 49GB、Windows 剩 1.5GB 整机换页；32GB 时渲染启动窗口峰值
+  31.75GB 顶穿死线，两晚 7 次内核 OOM 击杀 ComfyUI（story 约六成失败）。
+- **证据**：journalctl 7 次击杀记录与 7 条 FAILED 渲染一一对应；探针实测
+  空载匿名 24GB、块启动峰值 31.75GB、采样稳态 20.5GB
+  （docs/comfyui-oom-rootcause.md）。
+- **推翻条件**：模型/量化方案变更导致驻留或峰值明显变化时，用同款探针
+  （scratchpad ab-arm.sh + RssAnon 采样）重测后再调。
+
 ## D7 · 参数优先级：显式请求 > Skill 缺省 > config 兜底
 
 - **结论**：用户明说的永远赢；Skill 只补请求里留空的旋钮（style、target_seconds、
