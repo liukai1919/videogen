@@ -15,6 +15,7 @@
 # every other store.
 
 import asyncio
+from contextlib import nullcontext
 from datetime import UTC, datetime
 import json
 import logging
@@ -32,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from videogen_service.agents import AgentManager
 from videogen_service.artifacts import write_json_atomic
 from videogen_service.assets import AssetStore
+from videogen_service.braingate import BrainGate
 from videogen_service.config import ServiceConfig
 from videogen_service.export import narration_srt
 from videogen_service.jobs import (
@@ -118,10 +120,13 @@ class ChatClient(Protocol):
 
 
 class OllamaChatClient:
-    def __init__(self, config: ServiceConfig) -> None:
+    def __init__(
+        self, config: ServiceConfig, *, brain_gate: BrainGate | None = None
+    ) -> None:
         self._base_url = config.ollama.base_url.rstrip("/")
         self._model = config.script.model or config.ollama.model
         self._timeout = config.script.timeout_seconds
+        self._brain_gate = brain_gate
 
     def chat(
         self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]]
@@ -141,13 +146,18 @@ class OllamaChatClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        # 生成期间挂上 BrainGate:渲染启动的 unload 会等我们说完这句话。
+        gate = self._brain_gate.active() if self._brain_gate else nullcontext()
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with gate, urllib.request.urlopen(
+                request, timeout=self._timeout
+            ) as response:
                 body = response.read()
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:400]
             raise AgentUnavailable(f"Ollama 返回 {error.code}: {detail}") from error
         except (TimeoutError, URLError, OSError) as error:
+            _LOGGER.warning("本地大脑调用失败: %s", error)
             raise AgentUnavailable(
                 f"连不上 Ollama({self._base_url}),请先启动它: {error}"
             ) from error
@@ -420,6 +430,13 @@ class ToolBox:
                 ["render_id"],
             ),
             tool(
+                "cancel_render",
+                "取消一条排队中或渲染中的视频渲染,别让不要的任务白烧卡。"
+                "已结束的渲染取消会报错。",
+                {"render_id": text},
+                ["render_id"],
+            ),
+            tool(
                 "inspect_failure",
                 "失败诊断:打包一条失败渲染/任务的完整上下文(报错原文、提交"
                 "参数、对应工作流配置、ComfyUI 连通性),据此分析原因并给出"
@@ -461,6 +478,7 @@ class ToolBox:
             "write_storyboard": self._write_storyboard,
             "check_job": self._check_job,
             "check_render": self._check_render,
+            "cancel_render": self._cancel_render,
             "inspect_failure": self._inspect_failure,
             "list_assets": self._list_assets,
             "read_skill_reference": self._read_skill_reference,
@@ -625,6 +643,15 @@ class ToolBox:
             "media_url": view.media_url,
         }
 
+    def _cancel_render(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        view = self._renders.cancel(str(arguments["render_id"]))
+        return {
+            "render_id": view.render_id,
+            "status": view.status,
+            "error": view.error,
+            "cancelled": True,
+        }
+
     def _inspect_failure(self, arguments: dict[str, Any]) -> dict[str, Any]:
         render_id = str(arguments.get("render_id") or "").strip()
         job_id = str(arguments.get("job_id") or "").strip()
@@ -767,10 +794,11 @@ class AgentService:
         memory: MemoryStore | None = None,
         # 外部 Agent worker 层;None = 只有本地大脑。
         workers: AgentManager | None = None,
+        brain_gate: BrainGate | None = None,
     ) -> None:
         self._config = config
         self._toolbox = toolbox
-        self._client = client or OllamaChatClient(config)
+        self._client = client or OllamaChatClient(config, brain_gate=brain_gate)
         self._memory = memory or MemoryStore(config.work_dir)
         self._workers = workers
         self._directory = config.work_dir / CHATS_DIRNAME

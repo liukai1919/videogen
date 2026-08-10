@@ -99,6 +99,7 @@ class FakeRenderer:
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         return b"FAKE-MP4"
 

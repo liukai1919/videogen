@@ -107,6 +107,7 @@ class FakeRenderer:
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         if on_progress is not None:
@@ -128,6 +129,7 @@ class FailingOnceRenderer(FakeRenderer):
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         if len(self.requests) == 1:
@@ -146,6 +148,7 @@ class BlockingRenderer(FakeRenderer):
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         self.started.set()

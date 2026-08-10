@@ -77,6 +77,7 @@ from videogen_service.projects import (
     ProjectStore,
     ProjectSummary,
 )
+from videogen_service.braingate import BrainGate
 from videogen_service.renderer import H3Renderer, RenderError, Renderer
 from videogen_service.scripting import ScriptError, ScriptStudio, ScriptUnavailable
 from videogen_service.service import RenderConflict, RenderNotFound, RenderService
@@ -114,11 +115,15 @@ def create_app(
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     skills = SkillLibrary(settings.skills_dir)
     memory = MemoryStore(settings.work_dir)
-    workshop = studio or ScriptStudio(settings, skills=skills, memory=memory)
+    # 本地大脑在途生成的守卫:渲染启动的 unload 等它说完话再卸模型。
+    brain_gate = BrainGate()
+    workshop = studio or ScriptStudio(
+        settings, skills=skills, memory=memory, brain_gate=brain_gate
+    )
     gpu_gate = Lock()
     service = RenderService(
         settings,
-        renderer or H3Renderer(settings),
+        renderer or H3Renderer(settings, brain_gate=brain_gate),
         studio=workshop,
         gpu_gate=gpu_gate,
     )
@@ -148,6 +153,7 @@ def create_app(
         client=chat_client,
         memory=memory,
         workers=agent_workers,
+        brain_gate=brain_gate,
     )
 
     @asynccontextmanager
@@ -809,6 +815,16 @@ def create_app(
             content_disposition_type="inline",
             headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
         )
+
+    @app.post("/v1/renders/{render_id}/cancel", response_model=RenderView)
+    def cancel_render(render_id: str) -> RenderView:
+        # 冻结契约不动:新增端点,终态沿用 FAILED + 可读错误文案。
+        try:
+            return service.cancel(render_id)
+        except RenderNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RenderConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.delete(
         "/v1/renders/{render_id}", status_code=status.HTTP_204_NO_CONTENT

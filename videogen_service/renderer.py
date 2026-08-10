@@ -13,7 +13,9 @@ from typing import Any, NamedTuple, Protocol
 from urllib.error import URLError
 import urllib.request
 
+from videogen_service.braingate import BrainGate
 from videogen_service.comfyui import (
+    ComfyUiCancelled,
     ComfyUiClient,
     ComfyUiError,
     ProgressEvent,
@@ -41,6 +43,10 @@ SHOT_HEADER = re.compile(
     r"\s*(续|接)?\s*\]\s*(.*)$"
 )
 PROGRESS_CEILING = 0.99
+
+
+class RenderCancelled(RuntimeError):
+    """用户主动取消。独立于 RenderError:失败要报错误原因,取消要报取消。"""
 
 
 class RenderError(RuntimeError):
@@ -73,6 +79,7 @@ class Renderer(Protocol):
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes: ...
 
 
@@ -504,7 +511,13 @@ def build_values(
 
 
 class H3Renderer:
-    def __init__(self, config: ServiceConfig, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        *,
+        logger: logging.Logger | None = None,
+        brain_gate: BrainGate | None = None,
+    ) -> None:
         required = {"prompt", "width", "height", "length", "seed"}
         for mode, settings in config.modes.items():
             missing = required - set(settings.inputs)
@@ -512,12 +525,14 @@ class H3Renderer:
                 raise RenderError(f"{mode} workflow 缺少指针: {sorted(missing)}")
         self._config = config
         self._logger = logger or logging.getLogger("videogen_service")
+        self._brain_gate = brain_gate
 
     def render(
         self,
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         config = self._config
         mode_settings = config.modes.get(request.mode)
@@ -540,6 +555,9 @@ class H3Renderer:
         refs_b64 = [_encode_ref(path) for path in request.refs]
         chunk_task = "r2v" if mode_settings.accepts_refs else ""
         if config.ollama.unload_before_render:
+            # 卸载会打断正在生成的聊天/编剧调用;先等大脑歇口气再动手。
+            if self._brain_gate is not None and not self._brain_gate.wait_idle(300.0):
+                self._logger.warning("本地大脑生成超 300s 未歇,先卸载继续渲染")
             release_ollama_vram(config, logger=self._logger)
         client = ComfyUiClient(
             base_url=config.comfyui.base_url,
@@ -566,6 +584,9 @@ class H3Renderer:
             if plans:
                 chunks: list[bytes] = []
                 for index, plan in enumerate(plans):
+                    # 块与块之间是天然的取消点:下一块还没提交,直接收手。
+                    if should_cancel is not None and should_cancel():
+                        raise RenderCancelled("渲染已取消")
                     anchor = (
                         extract_last_frame(chunks[-1])
                         if plan.anchored and chunks
@@ -594,7 +615,9 @@ class H3Renderer:
                             task_type=chunk_task,
                         ),
                     )
-                    output = client.render(workflow, on_progress=progress)
+                    output = client.render(
+                        workflow, on_progress=progress, should_cancel=should_cancel
+                    )
                     _require_mp4(output.filename)
                     chunks.append(output.data)
                 data = concat_videos(chunks)
@@ -604,9 +627,13 @@ class H3Renderer:
                     pointers=mode_settings.inputs,
                     values=build_values(request, config=config, uploaded=uploaded),
                 )
-                output = client.render(workflow, on_progress=progress)
+                output = client.render(
+                    workflow, on_progress=progress, should_cancel=should_cancel
+                )
                 _require_mp4(output.filename)
                 data = output.data
+        except ComfyUiCancelled as error:
+            raise RenderCancelled(str(error)) from error
         except ComfyUiError as error:
             raise RenderError(str(error)) from error
         self._logger.info(

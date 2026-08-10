@@ -4,6 +4,7 @@
 # studio deliberately stops there: choosing when to spend the GPU stays with the
 # control plane, which posts the returned prompt to /v1/renders.
 
+from contextlib import nullcontext
 import json
 import logging
 from pathlib import Path
@@ -13,6 +14,7 @@ import urllib.request
 
 from pydantic import BaseModel, Field, ValidationError
 
+from videogen_service.braingate import BrainGate
 from videogen_service.config import RenderMode, ServiceConfig
 from videogen_service.models import (
     DocumentSource,
@@ -56,10 +58,13 @@ class Summarizer(Protocol):
 
 
 class OllamaSummarizer:
-    def __init__(self, config: ServiceConfig) -> None:
+    def __init__(
+        self, config: ServiceConfig, *, brain_gate: "BrainGate | None" = None
+    ) -> None:
         self._base_url = config.ollama.base_url.rstrip("/")
         self._model = config.script.model or config.ollama.model
         self._script = config.script
+        self._brain_gate = brain_gate
 
     @property
     def model(self) -> str:
@@ -84,8 +89,10 @@ class OllamaSummarizer:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        # 生成期间挂上 BrainGate:渲染启动的 unload 会等这条编剧调用完成。
+        gate = self._brain_gate.active() if self._brain_gate else nullcontext()
         try:
-            with urllib.request.urlopen(
+            with gate, urllib.request.urlopen(
                 request, timeout=self._script.timeout_seconds
             ) as response:
                 body = response.read()
@@ -145,10 +152,13 @@ class ScriptStudio:
         summarizer: Summarizer | None = None,
         skills: SkillLibrary | None = None,
         memory: MemoryStore | None = None,
+        brain_gate: BrainGate | None = None,
     ) -> None:
         self._config = config
         self._fetcher = fetcher or YtDlpTranscriptFetcher(config.script)
-        self._summarizer = summarizer or OllamaSummarizer(config)
+        self._summarizer = summarizer or OllamaSummarizer(
+            config, brain_gate=brain_gate
+        )
         self._skills = skills or SkillLibrary(config.skills_dir)
         self._memory = memory or MemoryStore(config.work_dir)
 

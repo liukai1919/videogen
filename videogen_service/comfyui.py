@@ -41,6 +41,11 @@ _MAX_HEADER_LINE = 8_192
 _MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 
+class ComfyUiCancelled(RuntimeError):
+    """渲染被调用方主动取消。刻意不继承 ComfyUiError:上层把 ComfyUiError
+    一律包装成渲染失败,而取消要走自己的终态文案。"""
+
+
 class ComfyUiError(RuntimeError):
     pass
 
@@ -124,6 +129,7 @@ class ComfyUiClient:
         workflow: dict[str, Any],
         *,
         on_progress: Callable[[ProgressEvent], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> RenderedOutput:
         deadline = time.monotonic() + self.timeout_seconds
         # The socket opens before the prompt is submitted, otherwise the first
@@ -132,7 +138,9 @@ class ComfyUiClient:
             prompt_id = self._submit(workflow)
             if stream is not None:
                 stream.expect(prompt_id)
-            entry = self._await_history(prompt_id, deadline=deadline)
+            entry = self._await_history(
+                prompt_id, deadline=deadline, should_cancel=should_cancel
+            )
         reference = _first_result(entry)
         return RenderedOutput(
             data=self._download(reference), filename=reference["filename"]
@@ -194,8 +202,17 @@ class ComfyUiClient:
             raise ComfyUiError("ComfyUI 未返回 prompt_id")
         return prompt_id
 
-    def _await_history(self, prompt_id: str, *, deadline: float) -> dict[str, Any]:
+    def _await_history(
+        self,
+        prompt_id: str,
+        *,
+        deadline: float,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         while True:
+            if should_cancel is not None and should_cancel():
+                self._interrupt_if_ours(prompt_id)
+                raise ComfyUiCancelled("渲染已取消")
             history = self._request_json(f"/history/{urllib.parse.quote(prompt_id)}")
             entry = history.get(prompt_id)
             if isinstance(entry, dict):
@@ -208,6 +225,23 @@ class ComfyUiClient:
                     "可调大 config.yaml 的 comfyui.timeout_seconds"
                 )
             time.sleep(self.poll_interval_seconds)
+
+    def _interrupt_if_ours(self, prompt_id: str) -> None:
+        """/interrupt 是全实例级的,这台机器的 ComfyUI 还有别的用户;
+        只有确认正在跑的 prompt 就是我们这条时才打断,否则放它烧完
+        (等待方随即停止轮询,产物被丢弃)。尽力而为,失败不拦取消。"""
+        try:
+            queue = self._request_json("/queue")
+            running = queue.get("queue_running") or []
+            ours = any(
+                isinstance(item, list) and len(item) > 1 and item[1] == prompt_id
+                for item in running
+            )
+            if ours:
+                self._request_bytes("/interrupt", data=b"{}")
+                _LOGGER.info("已请求 ComfyUI 中断当前渲染 %s", prompt_id)
+        except ComfyUiError as error:
+            _LOGGER.warning("取消时中断 ComfyUI 失败(忽略): %s", error)
 
     def _download(self, reference: dict[str, str]) -> bytes:
         query = urllib.parse.urlencode(reference)

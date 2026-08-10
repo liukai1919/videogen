@@ -26,6 +26,7 @@ from videogen_service.renderer import (
     LENGTH_OFFSET,
     LENGTH_STEP,
     SHOT_HEADER,
+    RenderCancelled,
     Renderer,
     validate_render,
 )
@@ -65,6 +66,8 @@ class RenderService:
         self._state_lock = Lock()
         self._queue: Queue[RenderRequest | None] = Queue()
         self._closing = Event()
+        # 取消请求的登记簿:worker 出队时跳过,渲染器在块边界/轮询点自查。
+        self._cancel_requests: set[str] = set()
         self._config.work_dir.mkdir(parents=True, exist_ok=True)
         self._recover_interrupted()
         self._worker = Thread(
@@ -242,6 +245,33 @@ class RenderService:
             self._queue.put(request)
         return self.get(render_id)
 
+    def cancel(self, render_id: str) -> RenderView:
+        """取消一条渲染。QUEUED 直接标终态等 worker 跳过;RUNNING 登记
+        取消请求,渲染器在轮询点收手(若正跑的 ComfyUI prompt 确认是
+        我们的,顺带请求中断)。终态沿用 FAILED + 可读错误文案,不给
+        冻结契约引入新状态值。"""
+        with self._state_lock:
+            record = self._load_record(render_id)
+            if record is None:
+                raise RenderNotFound(f"render {render_id} 不存在")
+            if record.status not in {"QUEUED", "RUNNING"}:
+                raise RenderConflict(f"这条渲染已经结束({record.status}),没有可取消的")
+            self._cancel_requests.add(render_id)
+        if record.status == "QUEUED":
+            # worker 还没接手;先标终态,worker 出队时看登记簿跳过执行。
+            self._change(
+                render_id,
+                lambda rec: rec.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "progress": None,
+                        "error": "已取消(用户请求,未开始渲染)",
+                        "updated_at": _now(),
+                    }
+                ),
+            )
+        return self.get(render_id)
+
     def frame_path(self, render_id: str, slot: str) -> Path:
         """Where a submitted render's reference frame lives, for archival
         into the asset center."""
@@ -289,6 +319,10 @@ class RenderService:
                     return
                 if self._closing.is_set():
                     self._fail_for_shutdown(request.render_id)
+                elif request.render_id in self._cancel_requests:
+                    # 排队期已被取消,cancel() 标好了终态,这里只清登记。
+                    with self._state_lock:
+                        self._cancel_requests.discard(request.render_id)
                 else:
                     self._run(request)
             finally:
@@ -319,7 +353,11 @@ class RenderService:
                 )
 
             with self._gpu_gate:
-                output = self._renderer.render(request, on_progress=report)
+                output = self._renderer.render(
+                    request,
+                    on_progress=report,
+                    should_cancel=lambda: render_id in self._cancel_requests,
+                )
             write_bytes_atomic(self._render_dir(render_id) / "output.mp4", output)
             self._change(
                 render_id,
@@ -328,6 +366,18 @@ class RenderService:
                         "status": "DONE",
                         "progress": None,
                         "error": None,
+                        "updated_at": _now(),
+                    }
+                ),
+            )
+        except RenderCancelled:
+            self._change(
+                render_id,
+                lambda record: record.model_copy(
+                    update={
+                        "status": "FAILED",
+                        "progress": None,
+                        "error": "已取消(用户请求)",
                         "updated_at": _now(),
                     }
                 ),
@@ -344,6 +394,9 @@ class RenderService:
                     }
                 ),
             )
+        finally:
+            with self._state_lock:
+                self._cancel_requests.discard(render_id)
 
     def _fail_for_shutdown(self, render_id: str) -> None:
         self._change(

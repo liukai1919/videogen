@@ -115,6 +115,7 @@ class FakeRenderer:
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         return b"FAKE-MP4"
@@ -126,6 +127,7 @@ class FailingOnceRenderer(FakeRenderer):
         request: RenderRequest,
         *,
         on_progress: Callable[[RenderProgress], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> bytes:
         self.requests.append(request)
         if len(self.requests) == 1:
