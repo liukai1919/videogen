@@ -24,6 +24,7 @@ import re
 import secrets
 import shutil
 from threading import Lock
+import time
 from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
 import urllib.request
@@ -45,7 +46,12 @@ from videogen_service.jobs import (
 )
 from videogen_service.memory import MemoryStore
 from videogen_service.models import RenderSpec, ScriptOptions
-from videogen_service.renderer import RenderError, is_timeline_mode
+from videogen_service.renderer import (
+    MAX_RENDER_PIXELS,
+    RenderError,
+    is_timeline_mode,
+    mode_capability_schema,
+)
 from videogen_service.scripting import ScriptError, ScriptStudio
 from videogen_service.service import (
     RenderConflict,
@@ -60,11 +66,9 @@ CHATS_DIRNAME = ".chats"
 # A model that keeps calling tools without answering is looping, not working.
 _MAX_TOOL_ROUNDS = 8
 _MAX_TURN_MESSAGES = 60  # context sent to the brain per turn, newest kept
-# 本机实测内存红线(2026-08-09 两次 OOM 击杀 ComfyUI 得出):1080p 在模型
-# 加载阶段就顶穿 32GB 内存,864x480 的 30 秒双段渲染同样阵亡。安全包络是
-# ≤864x480 的像素量、单条渲染总时长 ≤renderer.max_seconds(时长上限走配置,
-# 换机器/扩内存后改 config 即可,这里只钉死像素量)。
-_MAX_RENDER_PIXELS = 864 * 480
+# 像素红线的唯一事实源在 renderer.MAX_RENDER_PIXELS(能力表同源),
+# 这里只是给守卫留个本地名字。
+_MAX_RENDER_PIXELS = MAX_RENDER_PIXELS
 
 
 class AgentError(RuntimeError):
@@ -450,6 +454,32 @@ class ToolBox:
                 ["render_id"],
             ),
             tool(
+                "wait_render",
+                "阻塞等待一条渲染到终态再返回。只给批处理/外部 worker 用;"
+                "交互对话里别用,会占住整个回合,对话该用 check_render。",
+                {
+                    "render_id": text,
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "最长等待秒数,默认 900,上限 1800",
+                    },
+                },
+                ["render_id"],
+            ),
+            tool(
+                "wait_job",
+                "阻塞等待一条图片/配音/合成任务到终态再返回。只给批处理/"
+                "外部 worker 用;交互对话里该用 check_job。",
+                {
+                    "job_id": text,
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "最长等待秒数,默认 900,上限 1800",
+                    },
+                },
+                ["job_id"],
+            ),
+            tool(
                 "inspect_failure",
                 "失败诊断:打包一条失败渲染/任务的完整上下文(报错原文、提交"
                 "参数、对应工作流配置、ComfyUI 连通性),据此分析原因并给出"
@@ -492,6 +522,8 @@ class ToolBox:
             "check_job": self._check_job,
             "check_render": self._check_render,
             "cancel_render": self._cancel_render,
+            "wait_render": self._wait_render,
+            "wait_job": self._wait_job,
             "inspect_failure": self._inspect_failure,
             "list_assets": self._list_assets,
             "read_skill_reference": self._read_skill_reference,
@@ -518,7 +550,13 @@ class ToolBox:
 
     def _list_capabilities(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return {
-            "video_modes": sorted(self._config.modes),
+            "video_modes": [
+                {
+                    "mode": mode,
+                    **mode_capability_schema(settings, config=self._config),
+                }
+                for mode, settings in sorted(self._config.modes.items())
+            ],
             "capabilities": [
                 {
                     "capability_id": capability_id,
@@ -675,6 +713,51 @@ class ToolBox:
             "error": view.error,
             "cancelled": True,
         }
+
+    @staticmethod
+    def _wait_timeout(arguments: dict[str, Any]) -> float:
+        raw = arguments.get("timeout_seconds")
+        try:
+            timeout = float(raw) if raw is not None else 900.0
+        except (TypeError, ValueError):
+            timeout = 900.0
+        return min(max(timeout, 1.0), 1800.0)
+
+    def _wait_render(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        render_id = str(arguments["render_id"])
+        deadline = time.monotonic() + self._wait_timeout(arguments)
+        while True:
+            view = self._renders.get(render_id)
+            if view.status in {"DONE", "FAILED"}:
+                return {
+                    "render_id": view.render_id,
+                    "status": view.status,
+                    "error": view.error,
+                    "media_url": view.media_url,
+                }
+            if time.monotonic() >= deadline:
+                return {
+                    "render_id": render_id,
+                    "status": view.status,
+                    "timed_out": True,
+                }
+            time.sleep(5.0)
+
+    def _wait_job(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        job_id = str(arguments["job_id"])
+        deadline = time.monotonic() + self._wait_timeout(arguments)
+        while True:
+            view = self._jobs.get(job_id)
+            if view.status in {"DONE", "FAILED"}:
+                return {
+                    "job_id": view.job_id,
+                    "status": view.status,
+                    "error": view.error,
+                    "media_url": view.media_url,
+                }
+            if time.monotonic() >= deadline:
+                return {"job_id": job_id, "status": view.status, "timed_out": True}
+            time.sleep(5.0)
 
     def _inspect_failure(self, arguments: dict[str, Any]) -> dict[str, Any]:
         render_id = str(arguments.get("render_id") or "").strip()

@@ -45,6 +45,10 @@ def make_config(tmp_path: Path) -> ServiceConfig:
                     "workflow_file": str(tmp_path / "t2v.json"),
                     "inputs": {"prompt": ["1.text"]},
                 },
+                "story": {
+                    "workflow_file": str(tmp_path / "story.json"),
+                    "inputs": {"prompt": ["1.text"], "timeline": ["1.timeline"]},
+                },
             },
             "capabilities": {
                 "flux-t2i": {
@@ -141,13 +145,17 @@ def test_the_capability_catalog_covers_both_lanes(tmp_path: Path) -> None:
     with TestClient(app) as client:
         catalog = client.get("/v1/capabilities").json()
     by_id = {entry["capability_id"]: entry for entry in catalog}
-    assert by_id["t2v"] == {
-        "capability_id": "t2v",
-        "kind": "t2v",
-        "output": "video",
-        "submit_via": "renders",
-        "needs_gpu": True,
-    }
+    t2v = by_id["t2v"]
+    assert t2v["output"] == "video" and t2v["submit_via"] == "renders"
+    # 参数事实表随能力条目一起给出(M3 活数据化),与校验规则同源。
+    assert t2v["schema"]["timeline"] is False
+    assert t2v["schema"]["seconds"] == {"min": 5.0, "max": 15.0}
+    story = by_id["story"]["schema"]
+    assert story["timeline"] is True
+    assert story["per_shot_seconds"] == {"min": 5.0, "max": 15.0}
+    assert story["total_seconds_max"] == 120.0
+    assert story["accepts_segment_refs"] is True
+    assert story["max_pixels"] == 864 * 480
     assert by_id["flux-t2i"]["output"] == "image"
     assert by_id["flux-t2i"]["submit_via"] == "jobs"
     assert by_id["local-tts"]["output"] == "audio"

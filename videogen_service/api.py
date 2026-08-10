@@ -78,7 +78,12 @@ from videogen_service.projects import (
     ProjectSummary,
 )
 from videogen_service.braingate import BrainGate
-from videogen_service.renderer import H3Renderer, RenderError, Renderer
+from videogen_service.renderer import (
+    H3Renderer,
+    RenderError,
+    Renderer,
+    mode_capability_schema,
+)
 from videogen_service.scripting import ScriptError, ScriptStudio, ScriptUnavailable
 from videogen_service.service import RenderConflict, RenderNotFound, RenderService
 from videogen_service.skills import SkillLibrary
@@ -426,6 +431,10 @@ def create_app(
                 "output": "video",
                 "submit_via": "renders",
                 "needs_gpu": True,
+                # 参数事实表:与 validate_render 同源,替代提示词硬编码。
+                "schema": mode_capability_schema(
+                    settings.modes[mode], config=settings
+                ),
             }
             for mode in sorted(settings.modes)
         ]

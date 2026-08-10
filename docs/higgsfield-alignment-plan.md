@@ -57,6 +57,20 @@ negative_prompt / 每段 refs / prompt_enhance 三个官方能力没接线。
 验收：把提示词里的 H3 参数描述删掉后，agent 仍能通过 `list_capabilities` 排出合法任务；
 故意传 20s/1080p，任务被纠偏执行且返回里可见 adjustments；场景④由"提示词求它守规矩"变成"服务端保证"。
 
+**M3 落地记（2026-08-10）：**
+- 3.1 ✓ `mode_capability_schema`（renderer.py）作为唯一事实源，/v1/capabilities 与
+  agent 的 list_capabilities 共用，像素红线常量同源收编。
+- 3.2 缓：M2 把段长规则前移进工具描述后 R2 全轮零失败提交，adjustments 从
+  "必需"降为"保险带"，暂不做。
+- 3.3a/c（negative_prompt、prompt_enhance）缓：节点 story 通路的消费点未证实
+  （只有 fl2v 路径明确读 negativePrompt）——continuous_reference 空转的教训在前，
+  拒绝再接可能空转的线；待单独实验证实后再接。
+- 3.3b ✓ segment_ref_assets 全链（agent/HTTP/存储/指纹/timeline 每段注入），
+  真机探针验证节点接受;这是 M4 风格钥匙的通道。
+- 3.4 ✓ wait_render / wait_job 阻塞工具（默认 900s,上限 1800s,超时带标记返回）。
+- 计划外并入：编剧裁剪器就近适配（修"片长偏短八成"）、continues 判据重写、
+  默认风格中性化 + write_storyboard style 参数。
+
 ## M4 · 生产新能力：style key + 成片评分闭环（实验性，各 2–3 人日）
 
 | # | 任务 | 说明 |

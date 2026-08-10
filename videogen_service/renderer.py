@@ -131,8 +131,44 @@ def job_seed(render_id: str) -> int:
     return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
+# 本机实测 OOM 红线的像素量:864x480(1080p 在模型加载阶段就顶穿内存,
+# 见 docs/comfyui-oom-rootcause.md)。agent 守卫与能力表共用这一个数。
+MAX_RENDER_PIXELS = 864 * 480
+
+
 def is_timeline_mode(settings: ModeConfig) -> bool:
     return TIMELINE_INPUT in settings.inputs
+
+
+def mode_capability_schema(settings: ModeConfig, *, config: ServiceConfig) -> dict[str, Any]:
+    """一个视频模式的参数事实表,/v1/capabilities 与 agent 的
+    list_capabilities 共用。与 validate_render 的规则一一镜像——
+    提示词里的硬编码参数从此有活数据源,换模型改 config 即可。"""
+    renderer = config.renderer
+    timeline = is_timeline_mode(settings)
+    schema: dict[str, Any] = {
+        "timeline": timeline,
+        "fps": renderer.fps,
+        "max_pixels": MAX_RENDER_PIXELS,
+        "proven_resolution": "864x480",
+        "accepts_refs": settings.accepts_refs,
+        "accepts_segment_refs": timeline,
+        "first_frame": "first_frame" in settings.inputs,
+        "last_frame": "last_frame" in settings.inputs,
+    }
+    if timeline:
+        schema["per_shot_seconds"] = {
+            "min": renderer.min_seconds,
+            "max": renderer.max_seconds,
+        }
+        schema["total_seconds_max"] = renderer.max_total_seconds
+        schema["shot_header"] = "[起s-止s] 普通镜头;[起s-止s续] 上一镜同一动作的延续"
+    else:
+        schema["seconds"] = {
+            "min": renderer.min_seconds,
+            "max": renderer.max_seconds,
+        }
+    return schema
 
 
 def parse_storyboard(prompt: str, *, default_seconds: float) -> Storyboard:

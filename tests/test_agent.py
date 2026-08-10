@@ -528,6 +528,44 @@ def test_read_skill_reference_reports_unknowns_readably(tmp_path: Path) -> None:
     assert "beat.md" in result["error"]
 
 
+def test_wait_render_returns_the_terminal_state(tmp_path: Path) -> None:
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "wait_render",
+                        {"render_id": "r-wait", "timeout_seconds": 30},
+                    )
+                ],
+            },
+            {"content": "等到了。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "r-wait",
+                "mode": "t2v",
+                "prompt": "日出雪山",
+                "width": 864,
+                "height": 480,
+                "seconds": 6,
+            },
+        )
+        assert submitted.status_code == 202
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "等它渲完"}
+        ).json()
+
+    result = json.loads(record["messages"][2]["content"])
+    assert result["status"] == "DONE"
+    assert result.get("timed_out") is None
+
+
 def test_write_storyboard_forwards_style(tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
