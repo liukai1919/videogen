@@ -83,6 +83,19 @@ def test_storyboard_builds_director_segments() -> None:
     assert timeline["output"]["exportMode"] == "all"
 
 
+def test_continuity_flag_rides_from_config_into_the_timeline() -> None:
+    board = parse_storyboard("[0s-5s] a\n[5s-10s] b", default_seconds=5)
+    off = build_timeline(board, config=project_config(), width=864, height=480)
+    on = build_timeline(
+        board,
+        config=project_config(continuous_reference=True),
+        width=864,
+        height=480,
+    )
+    assert off["global"]["continuousReference"] is False
+    assert on["global"]["continuousReference"] is True
+
+
 def test_storyboard_duration_is_aligned_per_shot() -> None:
     board = parse_storyboard("[0s-5s] a\n[5s-10s] b", default_seconds=5)
 

@@ -15,6 +15,10 @@ renderer:
   max_seconds: 15.0
   max_total_seconds: 120.0
   max_shots: 12
+  # story 跨段连贯:Director 节点把上一段尾帧和外观参考自动带进下一段,
+  # 角色/场景跨段一致的工程解。代价是每段画布多前缀帧,显存吃紧的机器
+  # 保持 false。
+  continuous_reference: false
 
 ollama:
   # H3 and a 27B LLM do not fit on the same 32GB GPU. The service asks Ollama

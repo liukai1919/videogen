@@ -26,6 +26,10 @@ class RendererConfig(StrictModel):
     max_seconds: float = Field(gt=0)
     max_total_seconds: float = Field(gt=0)
     max_shots: int = Field(gt=0)
+    # story 模式的跨段连贯:Director 节点把上一段尾帧和外观参考带进下一段,
+    # 角色/场景跨段一致的工程解。代价是每段画布多出前缀帧,显存/内存占用
+    # 上升——本机 32GB 红线下先默认关,试通过再开。
+    continuous_reference: bool = False
 
     @model_validator(mode="after")
     def validate_ranges(self) -> "RendererConfig":

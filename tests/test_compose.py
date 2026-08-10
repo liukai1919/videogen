@@ -100,6 +100,21 @@ def test_audio_only_copies_the_video_stream() -> None:
     assert "-shortest" not in command  # 旁白短于画面时不能截断视频
 
 
+def test_narration_mixes_over_native_audio() -> None:
+    command = ffmpeg_command(
+        video=Path("/w/vg_1/output.mp4"),
+        audio=Path("/w/.jobs/job_tts/output.wav"),
+        subtitles=None,
+        output="output.mp4",
+        mix_native=True,
+    )
+    graph = command[command.index("-filter_complex") + 1]
+    assert "volume=0.3" in graph and "amix=inputs=2" in graph
+    assert "duration=first" in graph  # 画面原声定长:解说短了原声继续
+    assert "[aout]" in command  # 出的是混音结果,不是解说直通
+    assert "1:a:0" not in command
+
+
 def test_subtitles_force_a_reencode() -> None:
     command = ffmpeg_command(
         video=Path("/w/vg_1/output.mp4"),

@@ -1,0 +1,7 @@
+name: 概念预告片
+description: 电影级概念预告片质感:强对比戏剧光、快节奏、跨段角色一致、画面无文字。
+category: 预告片
+defaults:
+  style: 电影级概念预告片质感,强对比戏剧光,体积光,色调统一,快速有力的镜头运动,画面里不要出现文字、字幕或水印
+  shot_seconds: 5
+  target_seconds: 15

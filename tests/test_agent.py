@@ -236,6 +236,51 @@ def test_storyboard_and_video_tools_compose(tmp_path: Path) -> None:
         assert render.status_code == 200
 
 
+def test_the_render_envelope_guard_blocks_oom_specs(tmp_path: Path) -> None:
+    # 2026-08-09 的两种真实死法:1080p 在模型加载阶段 OOM,30 秒双段 story
+    # 渲染中途 OOM。守卫要在排队之前把它们拦下来,并让模型读得懂原因。
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
+                        {
+                            "mode": "t2v",
+                            "prompt": "夜景",
+                            "width": 1920,
+                            "height": 1080,
+                        },
+                    )
+                ],
+            },
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
+                        {"mode": "story", "prompt": "[0s-15s] 开场\n[15s-30s] 结尾"},
+                    )
+                ],
+            },
+            {"content": "两条都超本机红线,没有排渲染。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages",
+            json={"text": "来一条 1080p 的 30 秒大片"},
+        ).json()
+        resolution = json.loads(record["messages"][2]["content"])
+        duration = json.loads(record["messages"][4]["content"])
+        assert "864x480" in resolution["error"]
+        assert "15" in duration["error"]
+        # Nothing slipped past the guard into the queue.
+        assert client.get("/v1/renders").json() == []
+
+
 def test_a_broken_tool_reports_instead_of_crashing(tmp_path: Path) -> None:
     chat = ScriptedChat(
         [

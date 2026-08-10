@@ -65,10 +65,12 @@ class FakeSummarizer:
             {
                 "title": "双曲空间的秘密",
                 "summary": "层级网络在双曲空间里更紧凑。",
+                "music": "低音铺底缓慢推进,弦乐拨奏渐强",
                 "shots": [
                     {
                         "seconds": 6,
                         "prompt": "网格向外扩张成放射状网络",
+                        "sound": "风掠过网格的低鸣",
                         "narration": "双曲空间装得下指数级的分支",
                     }
                 ],
@@ -155,7 +157,10 @@ def test_a_document_becomes_a_storyboard(tmp_path: Path) -> None:
         "truncated": False,
     }
     assert script["mode"] == "story"
-    assert script["prompt"].startswith("科普短片《双曲空间的秘密》")
+    assert script["prompt"].startswith("短片《双曲空间的秘密》")
+    # H3 原生出声:配乐进全局 preamble,音效折进分镜段落。
+    assert "配乐:低音铺底缓慢推进,弦乐拨奏渐强。" in script["prompt"]
+    assert "音效:风掠过网格的低鸣" in script["prompt"]
     prompt = summarizer.prompts[0]
     assert "本地资料文档《双曲空间研究》" in prompt
     assert "面向初中生" in prompt

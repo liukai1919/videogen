@@ -173,7 +173,11 @@ class LocalJobRunner:
                 directory / subtitles_name, spec.subtitles.encode("utf-8")
             )
         command = ffmpeg_command(
-            video=video, audio=audio, subtitles=subtitles_name, output="output.mp4"
+            video=video,
+            audio=audio,
+            subtitles=subtitles_name,
+            output="output.mp4",
+            mix_native=audio is not None and _has_audio_stream(video),
         )
         try:
             completed = subprocess.run(
@@ -500,8 +504,18 @@ class JobService:
         )
 
 
+# H3 渲染自带原生环境音;压混时把它衬在解说下面而不是抹掉。0.3 是
+# 人声在上、环境声可闻的常规底量,想要更沉浸可调大。
+_NATIVE_BED_VOLUME = 0.3
+
+
 def ffmpeg_command(
-    *, video: Path, audio: Path | None, subtitles: str | None, output: str
+    *,
+    video: Path,
+    audio: Path | None,
+    subtitles: str | None,
+    output: str,
+    mix_native: bool = False,
 ) -> list[str]:
     """The composition command, kept pure for tests. Runs with cwd at the job
     directory, so `subtitles`/`output` are bare filenames and the subtitles
@@ -524,14 +538,55 @@ def ffmpeg_command(
         ]
     else:
         command += ["-c:v", "copy"]
-    if audio is not None:
-        # The narration track replaces whatever the source carried. No
-        # -shortest: a narration briefer than the picture must not cut it.
+    if audio is not None and mix_native:
+        # H3 的原生音轨压低当床,解说铺在上面。duration=first 以画面原声
+        # 为准:解说短了原声继续,长了跟着画面截断。normalize=0 保持各自
+        # 音量,否则 amix 会把两路各砍一半。
+        command += [
+            "-filter_complex",
+            f"[0:a]volume={_NATIVE_BED_VOLUME}[bed];"
+            "[bed][1:a]amix=inputs=2:duration=first:normalize=0[aout]",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:a",
+            "aac",
+        ]
+    elif audio is not None:
+        # 渲染没带音轨(旧片子/非 H3 能力):解说独占。No -shortest: a
+        # narration briefer than the picture must not cut it.
         command += ["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
     else:
         command += ["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
     command.append(output)
     return command
+
+
+def _has_audio_stream(video: Path) -> bool:
+    """ffprobe 探一眼渲染里有没有音轨。探不动(没装 ffprobe、文件怪)就当
+    没有——退回解说独占的老行为,合成不因探测而失败。"""
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(video),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
 def _audio_output(directory: Path) -> Path:

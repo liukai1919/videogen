@@ -43,7 +43,11 @@ from videogen_service.jobs import (
 )
 from videogen_service.memory import MemoryStore
 from videogen_service.models import RenderSpec, ScriptOptions
-from videogen_service.renderer import RenderError
+from videogen_service.renderer import (
+    RenderError,
+    parse_storyboard,
+    storyboard_seconds,
+)
 from videogen_service.scripting import ScriptError, ScriptStudio
 from videogen_service.service import (
     RenderConflict,
@@ -57,6 +61,11 @@ CHATS_DIRNAME = ".chats"
 # A model that keeps calling tools without answering is looping, not working.
 _MAX_TOOL_ROUNDS = 8
 _MAX_TURN_MESSAGES = 60  # context sent to the brain per turn, newest kept
+# 本机实测内存红线(2026-08-09 两次 OOM 击杀 ComfyUI 得出):1080p 在模型
+# 加载阶段就顶穿 32GB 内存,864x480 的 30 秒双段渲染同样阵亡。安全包络是
+# ≤864x480 的像素量、单条渲染总时长 ≤renderer.max_seconds(时长上限走配置,
+# 换机器/扩内存后改 config 即可,这里只钉死像素量)。
+_MAX_RENDER_PIXELS = 864 * 480
 
 
 class AgentError(RuntimeError):
@@ -198,6 +207,10 @@ def _worker_prompt(
         '```json 代码块,内容是 {"tool": "<工具名>", "arguments": {...}};',
         "一次一个工具,代码块外不要写别的。结果会出现在下一轮的对话记录里。",
         "不需要工具时,直接输出给用户的最终回答(纯文本,不要 ```json 块)。",
+        "你自带的本地工具(文件读写、命令执行、联网搜索等)一律不要用:",
+        "平台工具只认上面的 JSON 协议,别的动作都是白费。",
+        f"一次用户请求最多 {_MAX_TOOL_ROUNDS} 轮工具调用,超限会被截断,",
+        "规划好再动手。",
         "",
         "## 可用工具",
         "```json",
@@ -341,7 +354,9 @@ class ToolBox:
                 "generate_video",
                 "排一条 H3 视频渲染,立即返回 render_id;用 check_render 查进度。"
                 "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴;"
-                "图生视频用 i2v 并给 first_frame_asset。",
+                "图生视频用 i2v 并给 first_frame_asset。"
+                f"本机上限 864x480、单条总时长 ≤"
+                f"{self._config.renderer.max_seconds:g} 秒,超限直接报错。",
                 {
                     "mode": {**text, "description": "t2v/i2v/flf2v/story"},
                     "prompt": text,
@@ -487,12 +502,40 @@ class ToolBox:
             height=_optional_int(arguments.get("height")) or 480,
             seconds=float(arguments.get("seconds") or 6.0),
         )
+        self._guard_render_envelope(spec)
         view = self._renders.submit(
             spec,
             first_frame=self._asset_frame(arguments.get("first_frame_asset")),
             last_frame=self._asset_frame(arguments.get("last_frame_asset")),
         )
         return {"render_id": view.render_id, "status": view.status}
+
+    def _guard_render_envelope(self, spec: RenderSpec) -> None:
+        """The machine's OOM red lines, enforced where the agent queues work.
+        The manual workbench path stays unrestricted — a person typing into
+        the form is deliberate; a model relaying "4k画质" is not."""
+        if spec.width * spec.height > _MAX_RENDER_PIXELS:
+            raise ValueError(
+                f"分辨率 {spec.width}x{spec.height} 超过本机内存红线"
+                "(最高 864x480 的像素量,1080p 实测必 OOM);"
+                "请用 864x480 渲染,需要高清就在成片阶段放大。"
+            )
+        limit = self._config.renderer.max_seconds
+        if spec.mode == "story":
+            board = parse_storyboard(spec.prompt, default_seconds=spec.seconds)
+            total = storyboard_seconds(board, fps=self._config.renderer.fps)
+            # +1s 容忍渲染器把每段对齐到 H3 长度台阶产生的零头。
+            if total > limit + 1.0:
+                raise ValueError(
+                    f"这条 story 总时长约 {total:g} 秒,超过本机单条渲染红线"
+                    f" ≤{limit:g} 秒(30 秒双段实测 OOM);"
+                    f"请拆成多条 ≤{limit:g} 秒的渲染分别提交。"
+                )
+        elif spec.seconds > limit:
+            raise ValueError(
+                f"{spec.seconds:g} 秒超过本机单条渲染红线 ≤{limit:g} 秒;"
+                "请缩短或拆成多条渲染。"
+            )
 
     def _compose_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
         subtitles = arguments.get("subtitles_srt")
@@ -817,6 +860,7 @@ class AgentService:
             return updated
 
     def _system_prompt(self) -> str:
+        limit = self._config.renderer.max_seconds
         lines = [
             "你是一个本地视频创作平台的 Agent;所有生成(视频/图片/配音)都在",
             "用户这台电脑上用本机模型完成,你负责规划并调用平台工具。",
@@ -828,6 +872,20 @@ class AgentService:
             "先弄清需求再动手;大的创作先给方案,用户点头再排任务。",
             "只在用户明确要求记住偏好时调用 save_memory。",
             "回答用用户的语言,默认中文。",
+            "",
+            "本机硬性红线(实测,超限会 OOM 击杀渲染后端):分辨率最高 864x480,",
+            f"单条渲染总时长 ≤{limit:g} 秒。用户要 1080p/4k 时,用 864x480 渲染,",
+            f"高清放到成片阶段解决;更长的片子拆成多条 ≤{limit:g} 秒的渲染。",
+            "",
+            "写视频画面提示词(generate_video 的 prompt)时:每段两到四句,写具体:",
+            "先主体和动作(谁、在哪、做什么),镜头运动用类型+幅度+速度",
+            "(如\"缓慢小幅推近\"),再一笔光线氛围。不要让画面里出现文字、字幕、",
+            "Logo、水印——字幕和片名用 compose_video 烧进成片;",
+            "同一角色或场景跨段出现时,每段用同一组关键词描述外观、服装、色调,",
+            "否则各段是独立渲染的,角色会长得不一样。",
+            "H3 会原生生成音频:段内可写\"音效:具体声音\"(如雨声、金属剐蹭),",
+            "开头无时间戳的全局行可写\"配乐:配器/速度/节奏\";写了才有指挥,",
+            "不写模型就自己瞎配。",
         ]
         preferences = self._memory.texts()
         if preferences:

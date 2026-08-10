@@ -254,7 +254,7 @@ def build_timeline(
             "prompt": board.preamble,
             "refs": [],
             "referenceVideo": {},
-            "continuousReference": False,
+            "continuousReference": config.renderer.continuous_reference,
         },
         "segments": segments,
         "gen": {"defaultFrameCount": frames[0] if frames else 0},

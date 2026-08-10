@@ -109,12 +109,16 @@ class OllamaSummarizer:
 class _DraftShot(BaseModel):
     seconds: float = 0.0
     prompt: str = ""
+    # H3 原生生成音频:这一镜的环境音/动作音,折进段落提示词里。
+    sound: str = ""
     narration: str = ""
 
 
 class _Draft(BaseModel):
     title: str = ""
     summary: str = ""
+    # 全片背景乐(配器/速度/节奏),进 preamble 成为全局提示词的一部分。
+    music: str = ""
     shots: list[_DraftShot] = Field(default_factory=list)
 
 
@@ -164,6 +168,7 @@ class ScriptStudio:
         preamble = _preamble(
             title=draft.title or transcript.title,
             style=request.style or settings.style,
+            music=draft.music,
         )
         prompt = storyboard_text(shots, preamble=preamble)
         board = parse_storyboard(prompt, default_seconds=settings.shot_seconds)
@@ -222,7 +227,9 @@ class ScriptStudio:
         )
         shots = _fit_shots(draft.shots, request=options, config=self._config)
         preamble = _preamble(
-            title=draft.title or title, style=options.style or settings.style
+            title=draft.title or title,
+            style=options.style or settings.style,
+            music=draft.music,
         )
         prompt = storyboard_text(shots, preamble=preamble)
         board = parse_storyboard(prompt, default_seconds=settings.shot_seconds)
@@ -263,8 +270,14 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit] + _TRUNCATION_NOTE, True
 
 
-def _preamble(*, title: str, style: str) -> str:
-    return f"科普短片《{title}》。统一风格:{style}。"
+def _preamble(*, title: str, style: str, music: str = "") -> str:
+    # 类型/人设不在这里焊死:题材由 Skill 和 style 供给,这行会成为
+    # H3 Director 的全局提示词:片名、统一风格,以及贯穿全片的配乐
+    # (H3 原生出声,配乐描述放全局才能各段一致)。
+    text = f"短片《{title}》。统一风格:{style}。"
+    if music:
+        text += f"配乐:{music}。"
+    return text
 
 
 def _apply_skill(request: _ScriptOptionsT, skill: Skill) -> _ScriptOptionsT:
@@ -304,7 +317,7 @@ def build_summary_prompt(
     memory: list[str] | None = None,
 ) -> str:
     intro = [
-        f"你是科普短视频的编剧。下面是 YouTube 视频《{transcript.title}》的字幕",
+        f"你是短视频编剧。下面是 YouTube 视频《{transcript.title}》的字幕",
         "(可能是机器自动听写的,会有错别字和口语,请按语义理解)。",
     ]
     return _compose_summary_prompt(
@@ -329,7 +342,7 @@ def build_document_prompt(
     skill: Skill | None = None,
     memory: list[str] | None = None,
 ) -> str:
-    intro = [f"你是科普短视频的编剧。下面是本地资料文档《{title}》的内容。"]
+    intro = [f"你是短视频编剧。下面是本地资料文档《{title}》的内容。"]
     return _compose_summary_prompt(
         intro,
         source_label="文档",
@@ -361,7 +374,7 @@ def _compose_summary_prompt(
     wanted = max(1, min(max_shots, round(target_seconds / shot_seconds)))
     lines = [
         *intro,
-        f"请把它改写成一条 {target_seconds:g} 秒左右的原创科普短片脚本。",
+        f"请把它改写成一条 {target_seconds:g} 秒左右的原创短片脚本。",
         "",
         "要求:",
         f"1. 全部用{request.output_language}输出。",
@@ -370,15 +383,26 @@ def _compose_summary_prompt(
         f"4. shots:{wanted} 个分镜(最多 {max_shots} 个),按讲解顺序排列。",
         f"5. 每个分镜的 seconds 在 {renderer.min_seconds:g} 到 "
         f"{renderer.max_seconds:g} 之间,建议 {shot_seconds:g}。",
-        "6. 每个分镜的 prompt 是给文生视频模型的画面描述:主体、动作、镜头运动、",
-        "   光线、氛围,一句到两句,不要写字幕、文字、水印、台标或真实人物姓名。",
-        "7. 每个分镜的 narration 是这一镜的解说词,一到两句;所有 narration 连起来",
-        "   要能独立讲清楚原理,不能只是复述画面。",
-        f"8. 内容要重新组织和表达,不要整句照抄原{source_label}。",
-        "9. 只输出 JSON,不要解释,不要代码块。",
+        "6. 每个分镜的 prompt 是给文生视频模型的画面描述,两到四句,写具体:",
+        "   先说主体和动作(谁、在哪、做什么),再说镜头运动——用类型+幅度+速度",
+        "   (如\"缓慢小幅推近\"\"快速横移跟随\"),最后一笔光线(主光是什么、",
+        "   氛围色调)。不要写字幕、文字、水印、台标或真实人物姓名。",
+        "7. 同一角色或场景出现在多个分镜时,每次都用同一组关键词描述它的外观、",
+        "   服装、色调:各分镜是独立渲染的,描述一变角色就会变样。",
+        "8. 每个分镜的 sound 是这一镜的环境音和动作音,一句,写具体的声音",
+        "   (如\"雨点敲打金属棚顶,远处闷雷\"),视频模型会真的生成它们;",
+        "   不需要就给空字符串。",
+        "9. music 是贯穿全片的背景乐,一到两句,写配器、速度、节奏和强弱变化",
+        "   (如\"低音鼓点缓慢推进,弦乐拨奏渐强\"),不要抽象情绪词;",
+        "   不要配乐就给空字符串。",
+        "10. 每个分镜的 narration 是这一镜的解说词,一到两句;朗读时长要贴合该镜",
+        "   的 seconds(中文约每秒 4~5 个字),宁短勿长。所有 narration 连起来要",
+        "   能独立讲清楚内容,不能只是复述画面。",
+        f"11. 内容要重新组织和表达,不要整句照抄原{source_label}。",
+        "12. 只输出 JSON,不要解释,不要代码块。",
         "",
-        'JSON 结构:{"title": "...", "summary": "...", "shots": '
-        '[{"seconds": 6, "prompt": "...", "narration": "..."}]}',
+        'JSON 结构:{"title": "...", "summary": "...", "music": "...", "shots": '
+        '[{"seconds": 6, "prompt": "...", "sound": "...", "narration": "..."}]}',
     ]
     if memory:
         # Standing preferences the user explicitly saved; skill and per-run
@@ -449,6 +473,10 @@ def _fit_shots(
         prompt = " ".join(draft.prompt.split())
         if not prompt:
             continue
+        sound = " ".join(draft.sound.split())
+        if sound:
+            # H3 的段落提示词就是它的音频指挥台:环境音写进文字才会被生成。
+            prompt = f"{prompt} 音效:{sound}"
         seconds = draft.seconds if draft.seconds > 0 else fallback
         seconds = min(max(seconds, renderer.min_seconds), renderer.max_seconds)
         # The renderer pads every shot up to the next H3 length step, so the
