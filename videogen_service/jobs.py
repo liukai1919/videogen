@@ -20,7 +20,13 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+import base64
+import json
+import urllib.request
+from urllib.error import HTTPError, URLError
+
 from videogen_service.artifacts import write_bytes_atomic, write_json_atomic
+from videogen_service.braingate import BrainGate
 from videogen_service.comfyui import ComfyUiClient, load_workflow, patch_workflow
 from videogen_service.config import (
     Capability,
@@ -36,6 +42,10 @@ _JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 # 成片合成是内建能力:FFmpeg 在本机把渲染视频、配音音轨和 SRT 字幕拼成成片。
 # 不进 config,因为它不依赖任何模型,只要机器上有 ffmpeg。
 COMPOSE_CAPABILITY_ID = "compose"
+REVIEW_CAPABILITY_ID = "review"
+# 评分抽帧数与送模型的长边:6 帧足以覆盖跨段一致性,448px 控制显存与延迟。
+_REVIEW_FRAMES = 6
+_REVIEW_FRAME_EDGE = 448
 _FFMPEG_TIMEOUT_SECONDS = 1800.0
 
 JobStatus = Literal["QUEUED", "RUNNING", "DONE", "FAILED"]
@@ -95,7 +105,15 @@ class ComposeCapability(StrictModel):
     needs_gpu: bool = False
 
 
-AnyCapability = Capability | ComposeCapability
+class ReviewCapability(StrictModel):
+    """成片评分:FFmpeg 抽帧(CPU) + 本地 VLM 打分(qwen3.6 原生多模态,
+    2026-08-10 实测)。VLM 推理上卡,所以走 GPU 闸门与渲染排队。"""
+
+    kind: Literal["review"] = "review"
+    needs_gpu: bool = True
+
+
+AnyCapability = Capability | ComposeCapability | ReviewCapability
 
 
 class JobRecord(StrictModel):
@@ -143,10 +161,15 @@ class LocalJobRunner:
     Nothing leaves the box."""
 
     def __init__(
-        self, config: ServiceConfig, *, renders: RenderService | None = None
+        self,
+        config: ServiceConfig,
+        *,
+        renders: RenderService | None = None,
+        brain_gate: BrainGate | None = None,
     ) -> None:
         self._config = config
         self._renders = renders
+        self._brain_gate = brain_gate
 
     def run(
         self, spec: JobSpec, capability: AnyCapability, *, directory: Path
@@ -155,7 +178,83 @@ class LocalJobRunner:
             return self._run_comfy(spec, capability, directory=directory)
         if isinstance(capability, ComposeCapability):
             return self._run_compose(spec, directory=directory)
+        if isinstance(capability, ReviewCapability):
+            return self._run_review(spec, directory=directory)
         return self._run_command(spec, capability, directory=directory)
+
+    def _run_review(self, spec: JobSpec, *, directory: Path) -> str:
+        if self._renders is None:
+            raise JobError("评分需要渲染服务在场")
+        try:
+            video = self._renders.media_path(spec.render_id or "")
+        except RenderNotFound as error:
+            raise JobError(str(error)) from error
+        storyboard = self._renders.request_prompt(spec.render_id or "") or ""
+        frames = _extract_review_frames(video, directory=directory)
+        scores = self._score_frames(frames, storyboard=storyboard)
+        payload = {
+            "render_id": spec.render_id,
+            "model": self._config.ollama.model,
+            "frames": len(frames),
+            **scores,
+        }
+        write_json_atomic(directory / "review.json", payload)
+        return "review.json"
+
+    def _score_frames(
+        self, frames: list[bytes], *, storyboard: str
+    ) -> dict[str, object]:
+        rubric = [
+            "你是短片质量评审。下面按时间顺序给出一条成片的抽帧,",
+            "以及它的分镜脚本(创作意图)。逐项打 1-10 分并给一句话理由:",
+            "hook(第一帧作为开场的吸引力)、consistency(跨帧的角色/场景/",
+            "色调一致性,换脸换装扣分)、visual_quality(画面质量,畸变模糊",
+            "构图问题扣分)、alignment(画面与分镜意图的吻合度)。",
+            "只输出 JSON,不要解释:",
+            '{"hook": n, "consistency": n, "visual_quality": n,',
+            ' "alignment": n, "notes": "一句话总评"}',
+        ]
+        if storyboard:
+            rubric += ["", "分镜脚本:", storyboard[:2000]]
+        payload = json.dumps(
+            {
+                "model": self._config.ollama.model,
+                "stream": False,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "\n".join(rubric),
+                        "images": [
+                            base64.b64encode(frame).decode("ascii")
+                            for frame in frames
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self._config.ollama.base_url.rstrip('/')}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        gate = self._brain_gate.active() if self._brain_gate else nullcontext()
+        try:
+            with gate, urllib.request.urlopen(request, timeout=600) as response:
+                body = response.read()
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:300]
+            raise JobError(f"评分模型返回 {error.code}: {detail}") from error
+        except (TimeoutError, URLError, OSError) as error:
+            raise JobError(f"连不上评分模型: {error}") from error
+        try:
+            document = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise JobError("评分模型的响应不是 JSON") from error
+        message = document.get("message") if isinstance(document, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        return _extract_review_json(content or "")
 
     def _run_compose(self, spec: JobSpec, *, directory: Path) -> str:
         if self._renders is None:
@@ -316,6 +415,8 @@ class JobService:
             raise JobError("t2i 任务需要 prompt")
         if capability.kind == "tts" and spec.text is None:
             raise JobError("tts 任务需要 text")
+        if capability.kind == "review" and spec.render_id is None:
+            raise JobError("review 任务需要 render_id")
         if capability.kind == "compose":
             if spec.render_id is None:
                 raise JobError("compose 任务需要 render_id")
@@ -449,11 +550,13 @@ class JobService:
     def _capability(self, capability_id: str) -> AnyCapability:
         if capability_id == COMPOSE_CAPABILITY_ID:
             return ComposeCapability()
+        if capability_id == REVIEW_CAPABILITY_ID:
+            return ReviewCapability()
         capability = self._config.capabilities.get(capability_id)
         if capability is None:
             raise JobError(
                 f"未配置的能力: {capability_id};可用: "
-                f"{sorted([*self._config.capabilities, COMPOSE_CAPABILITY_ID])}"
+                f"{sorted([*self._config.capabilities, COMPOSE_CAPABILITY_ID, REVIEW_CAPABILITY_ID])}"
             )
         return capability
 
@@ -604,6 +707,67 @@ def _has_audio_stream(video: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
+def _extract_review_frames(video: Path, *, directory: Path) -> list[bytes]:
+    """均匀抽 N 帧缩到长边 448 的 JPEG(FFmpeg,CPU 不占卡)。"""
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(video),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    try:
+        duration = float(probe.stdout.strip())
+    except ValueError as error:
+        raise JobError(f"ffprobe 读不到成片时长: {probe.stderr[:200]}") from error
+    frames: list[bytes] = []
+    for index in range(_REVIEW_FRAMES):
+        stamp = duration * (index + 0.5) / _REVIEW_FRAMES
+        target = directory / f"frame{index}.jpg"
+        completed = subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", f"{stamp:.3f}", "-i", str(video),
+                "-frames:v", "1",
+                "-vf", f"scale='min({_REVIEW_FRAME_EDGE},iw)':-2",
+                str(target),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if completed.returncode != 0 or not target.is_file():
+            raise JobError(
+                f"抽帧失败(第 {index + 1} 帧): "
+                f"{completed.stderr.decode('utf-8', errors='replace')[-200:]}"
+            )
+        frames.append(target.read_bytes())
+    return frames
+
+
+def _extract_review_json(content: str) -> dict[str, object]:
+    """宽容解析评分 JSON:剥代码栏、取第一个对象;分值钳到 1-10。"""
+    text = content.strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match is None:
+        raise JobError(f"评分模型没有返回 JSON: {text[:200]}")
+    try:
+        raw = json.loads(match.group(0))
+    except json.JSONDecodeError as error:
+        raise JobError(f"评分 JSON 解析失败: {match.group(0)[:200]}") from error
+    if not isinstance(raw, dict):
+        raise JobError("评分结果不是 JSON 对象")
+    scores: dict[str, object] = {}
+    for key in ("hook", "consistency", "visual_quality", "alignment"):
+        value = raw.get(key)
+        if not isinstance(value, (int, float)):
+            raise JobError(f"评分缺少 {key}")
+        scores[key] = max(1, min(10, int(round(float(value)))))
+    notes = raw.get("notes")
+    scores["notes"] = str(notes)[:500] if notes else ""
+    return scores
 
 
 def _audio_output(directory: Path) -> Path:

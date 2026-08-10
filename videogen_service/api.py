@@ -32,6 +32,7 @@ from videogen_service.documents import DocumentError, extract_text
 from videogen_service.export import build_project_export
 from videogen_service.jobs import (
     COMPOSE_CAPABILITY_ID,
+    REVIEW_CAPABILITY_ID,
     JOB_MEDIA_TYPES,
     JobConflict,
     JobError,
@@ -139,7 +140,8 @@ def create_app(
     )
     jobs = JobService(
         settings,
-        runner=job_runner or LocalJobRunner(settings, renders=service),
+        runner=job_runner
+        or LocalJobRunner(settings, renders=service, brain_gate=brain_gate),
         gpu_gate=gpu_gate,
     )
     # 外部 Agent worker 层(Claude Code/Codex):云端推理,不碰渲染执行。
@@ -458,6 +460,16 @@ def create_app(
                 "output": "video",
                 "submit_via": "jobs",
                 "needs_gpu": False,
+            }
+        )
+        # 成片评分也是内建能力:抽帧(CPU) + 本地 VLM 打分(上卡)。
+        catalog.append(
+            {
+                "capability_id": REVIEW_CAPABILITY_ID,
+                "kind": "review",
+                "output": "report",
+                "submit_via": "jobs",
+                "needs_gpu": True,
             }
         )
         return catalog

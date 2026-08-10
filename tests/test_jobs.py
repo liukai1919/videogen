@@ -160,6 +160,44 @@ def test_the_capability_catalog_covers_both_lanes(tmp_path: Path) -> None:
     assert by_id["flux-t2i"]["submit_via"] == "jobs"
     assert by_id["local-tts"]["output"] == "audio"
     assert by_id["local-tts"]["needs_gpu"] is False
+    review = by_id["review"]
+    assert review["output"] == "report"
+    assert review["submit_via"] == "jobs"
+    assert review["needs_gpu"] is True
+
+
+def test_review_submission_requires_a_render(tmp_path: Path) -> None:
+    app = create_app(
+        make_config(tmp_path), renderer=FakeRenderer(), job_runner=FakeRunner()
+    )
+    with TestClient(app) as client:
+        refused = client.post(
+            "/v1/jobs", json={"job_id": "rv-1", "capability": "review"}
+        )
+    assert refused.status_code == 400
+    assert "render_id" in refused.json()["detail"]
+
+
+def test_review_json_extraction_is_lenient() -> None:
+    from videogen_service.jobs import JobError, _extract_review_json
+    import pytest
+
+    fenced = (
+        "评分如下:\n```json\n"
+        '{"hook": 7, "consistency": 8.6, "visual_quality": 11,'
+        ' "alignment": 0, "notes": "开场稳"}\n```'
+    )
+    scores = _extract_review_json(fenced)
+    assert scores["hook"] == 7
+    assert scores["consistency"] == 9  # 四舍五入
+    assert scores["visual_quality"] == 10  # 钳到上限
+    assert scores["alignment"] == 1  # 钳到下限
+    assert scores["notes"] == "开场稳"
+
+    with pytest.raises(JobError, match="没有返回 JSON"):
+        _extract_review_json("这条片子不错")
+    with pytest.raises(JobError, match="缺少 hook"):
+        _extract_review_json('{"consistency": 5}')
 
 
 def test_an_image_job_runs_and_serves_its_output(tmp_path: Path) -> None:

@@ -282,6 +282,11 @@ class RenderService:
             )
         return self.get(render_id)
 
+    def request_prompt(self, render_id: str) -> str | None:
+        """这条渲染当初的提示词(分镜原文),给成片评分当创作意图对照。"""
+        request = self._read_request(self._render_dir(render_id))
+        return request.prompt if request is not None else None
+
     def frame_path(self, render_id: str, slot: str) -> Path:
         """Where a submitted render's reference frame lives, for archival
         into the asset center."""

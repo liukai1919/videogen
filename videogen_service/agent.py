@@ -39,6 +39,7 @@ from videogen_service.config import ServiceConfig
 from videogen_service.export import narration_srt
 from videogen_service.jobs import (
     COMPOSE_CAPABILITY_ID,
+    REVIEW_CAPABILITY_ID,
     JobError,
     JobNotFound,
     JobService,
@@ -435,8 +436,32 @@ class ToolBox:
                 ["render_id"],
             ),
             tool(
+                "review_video",
+                "给一条渲染完的成片打质量分:本地 VLM 抽帧评审 hook(开场"
+                "吸引力)/consistency(跨段一致性)/visual_quality(画面质量)/"
+                "alignment(与分镜意图吻合),各 1-10。排队即返回 job_id,"
+                "结果等 DONE 后用 check_job 拿。给 Release Review 当参考,"
+                "不替代人审。",
+                {"render_id": text},
+                ["render_id"],
+            ),
+            tool(
+                "save_render_frame_as_asset",
+                "把一条渲染的首帧或尾帧存进资产中心(定妆照、风格钥匙都"
+                "这么来),返回 asset_id,之后可挂 ref_assets 或"
+                " segment_ref_assets。",
+                {
+                    "render_id": text,
+                    "slot": {**text, "description": "first 或 last"},
+                    "name": {**text, "description": "资产名,如\"全片风格钥匙\""},
+                    "category": {**text, "description": "分类(风格/角色…),可省略"},
+                },
+                ["render_id", "slot", "name"],
+            ),
+            tool(
                 "check_job",
-                "查一条图片/配音/合成任务的状态。",
+                "查一条图片/配音/合成/评分任务的状态;评分任务 DONE 时"
+                "会带 review 分数。",
                 {"job_id": text},
                 ["job_id"],
             ),
@@ -518,6 +543,8 @@ class ToolBox:
             "generate_speech": self._generate_speech,
             "generate_video": self._generate_video,
             "compose_video": self._compose_video,
+            "review_video": self._review_video,
+            "save_render_frame_as_asset": self._save_render_frame,
             "write_storyboard": self._write_storyboard,
             "check_job": self._check_job,
             "check_render": self._check_render,
@@ -643,6 +670,28 @@ class ToolBox:
                 "请缩短,或改用 story 分镜(会自动拆块串行渲染)。"
             )
 
+    def _review_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        spec = JobSpec(
+            job_id=_mint_id("job"),
+            capability=REVIEW_CAPABILITY_ID,
+            render_id=str(arguments["render_id"]),
+        )
+        view = self._jobs.submit(spec)
+        return {"job_id": view.job_id, "status": view.status}
+
+    def _save_render_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        slot = str(arguments.get("slot") or "").strip()
+        if slot not in {"first", "last"}:
+            return {"error": "slot 只能是 first 或 last"}
+        path = self._renders.frame_path(str(arguments["render_id"]), slot)
+        record = self._assets.create(
+            name=str(arguments["name"]),
+            category=str(arguments.get("category") or ""),
+            filename=path.name,
+            data=path.read_bytes(),
+        )
+        return {"asset_id": record.asset_id, "name": record.name}
+
     def _compose_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
         subtitles = arguments.get("subtitles_srt")
         spec = JobSpec(
@@ -689,12 +738,21 @@ class ToolBox:
 
     def _check_job(self, arguments: dict[str, Any]) -> dict[str, Any]:
         view = self._jobs.get(str(arguments["job_id"]))
-        return {
+        result = {
             "job_id": view.job_id,
             "status": view.status,
             "error": view.error,
             "media_url": view.media_url,
         }
+        # 评分任务完成时把分数直接带回来,模型不用再解析文件。
+        if view.kind == REVIEW_CAPABILITY_ID and view.status == "DONE":
+            try:
+                result["review"] = json.loads(
+                    self._jobs.media_path(view.job_id).read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, JobNotFound):
+                pass
+        return result
 
     def _check_render(self, arguments: dict[str, Any]) -> dict[str, Any]:
         view = self._renders.get(str(arguments["render_id"]))
@@ -1106,6 +1164,11 @@ class AgentService:
             "角色要跨条锁脸时用 r2v 模式:ref_assets 给资产中心的定妆图 id,",
             "提示词里按序用 <Picture 1> 引用它(如\"<Picture 1> 中的红衣女子",
             "走进咖啡馆\");首次出现描述一次外观,之后只用标签。",
+            "全片色调质感要锁死时用\"风格钥匙\":挑一帧好画面用",
+            "save_render_frame_as_asset 存进资产中心,story 渲染时把它的",
+            "asset id 传给 segment_ref_assets,每一段都拿它当风格参考。",
+            "成片渲完可用 review_video 打质量分(hook/一致性/画质/意图吻合),",
+            "分数给用户做 Release Review 参考,不要自称最终判定。",
         ]
         lines += self._toolbox.skill_prompt_lines()
         preferences = self._memory.texts()

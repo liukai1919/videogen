@@ -81,6 +81,21 @@ class FakeRenderer:
 
 class FakeRunner:
     def run(self, spec: JobSpec, capability: Capability, *, directory: Path) -> str:
+        if getattr(capability, "kind", "") == "review":
+            write_bytes_atomic(
+                directory / "review.json",
+                json.dumps(
+                    {
+                        "hook": 7,
+                        "consistency": 9,
+                        "visual_quality": 8,
+                        "alignment": 8,
+                        "notes": "跨段色调统一,开场略平。",
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+            )
+            return "review.json"
         write_bytes_atomic(directory / "output.png", b"PNG")
         return "output.png"
 
@@ -526,6 +541,90 @@ def test_read_skill_reference_reports_unknowns_readably(tmp_path: Path) -> None:
     result = json.loads(record["messages"][2]["content"])
     assert "nope.md" in result["error"]
     assert "beat.md" in result["error"]
+
+
+def test_review_video_scores_ride_back_through_check_job(tmp_path: Path) -> None:
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call("review_video", {"render_id": "r-done"})
+                ],
+            },
+            {"content": "", "tool_calls": []},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        submitted = client.post(
+            "/v1/renders",
+            data={
+                "render_id": "r-done",
+                "mode": "t2v",
+                "prompt": "雪山",
+                "width": 864,
+                "height": 480,
+                "seconds": 6,
+            },
+        )
+        assert submitted.status_code == 202
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "给成片打个分"}
+        ).json()
+        review_submit = json.loads(record["messages"][2]["content"])
+        job_id = review_submit["job_id"]
+
+        # 评分任务在 FakeRunner 里立即完成;check_job 应带回分数。
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            state = client.get(f"/v1/jobs/{job_id}").json()
+            if state["status"] == "DONE":
+                break
+            time.sleep(0.01)
+        assert state["status"] == "DONE"
+
+        chat2 = ScriptedChat(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [tool_call("check_job", {"job_id": job_id})],
+                },
+                {"content": "分数出来了。"},
+            ]
+        )
+    with make_client(tmp_path, chat2) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "查评分"}
+        ).json()
+    checked = json.loads(record["messages"][2]["content"])
+    assert checked["review"]["consistency"] == 9
+    assert "跨段色调统一" in checked["review"]["notes"]
+
+
+def test_save_render_frame_rejects_bad_slots(tmp_path: Path) -> None:
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "save_render_frame_as_asset",
+                        {"render_id": "r-x", "slot": "middle", "name": "钥匙"},
+                    )
+                ],
+            },
+            {"content": "槽位不对。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "存帧"}
+        ).json()
+    result = json.loads(record["messages"][2]["content"])
+    assert "first 或 last" in result["error"]
 
 
 def test_wait_render_returns_the_terminal_state(tmp_path: Path) -> None:
