@@ -127,6 +127,32 @@ def test_subtitles_force_a_reencode() -> None:
     assert "0:a?" in command  # 源视频没有音轨也不报错
 
 
+def test_upscale_scales_before_burning_subtitles() -> None:
+    command = ffmpeg_command(
+        video=Path("/w/vg_1/output.mp4"),
+        audio=None,
+        subtitles="subs.srt",
+        output="output.mp4",
+        upscale_height=1080,
+    )
+    graph = command[command.index("-vf") + 1]
+    # 字幕在放大之后烧,目标分辨率下才够锐。
+    assert graph == "scale=-2:1080:flags=lanczos,subtitles=subs.srt"
+    assert "libx264" in command
+
+
+def test_upscale_alone_forces_a_reencode() -> None:
+    command = ffmpeg_command(
+        video=Path("/w/vg_1/output.mp4"),
+        audio=None,
+        subtitles=None,
+        output="output.mp4",
+        upscale_height=1080,
+    )
+    assert "scale=-2:1080:flags=lanczos" in command
+    assert command[command.index("-c:v") + 1] == "libx264"
+
+
 def test_compose_validation_over_http(tmp_path: Path) -> None:
     app = create_app(
         make_config(tmp_path), renderer=FakeRenderer(), job_runner=RecordingRunner()
@@ -144,6 +170,17 @@ def test_compose_validation_over_http(tmp_path: Path) -> None:
         )
         assert nothing_to_add.status_code == 400
         assert "至少需要" in nothing_to_add.json()["detail"]
+
+        upscale_only = client.post(
+            "/v1/jobs",
+            json={
+                "job_id": "job_c2",
+                "capability": "compose",
+                "render_id": "vg_1",
+                "upscale_height": 1080,
+            },
+        )
+        assert upscale_only.status_code == 202
 
 
 def test_compose_runs_through_the_job_queue(tmp_path: Path) -> None:

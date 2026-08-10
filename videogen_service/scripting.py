@@ -112,6 +112,8 @@ class _DraftShot(BaseModel):
     # H3 原生生成音频:这一镜的环境音/动作音,折进段落提示词里。
     sound: str = ""
     narration: str = ""
+    # 上一镜同一动作的直接延续 → 时间轴 续 标记 → 跨块帧接力。
+    continues: bool = False
 
 
 class _Draft(BaseModel):
@@ -389,6 +391,8 @@ def _compose_summary_prompt(
         "   氛围色调)。不要写字幕、文字、水印、台标或真实人物姓名。",
         "7. 同一角色或场景出现在多个分镜时,每次都用同一组关键词描述它的外观、",
         "   服装、色调:各分镜是独立渲染的,描述一变角色就会变样。",
+        "   若该镜是上一镜同一动作的直接延续(画面要无缝接着演),把 continues",
+        "   设为 true;切换场景、时间或视角就保持 false,第一镜必须 false。",
         "8. 每个分镜的 sound 是这一镜的环境音和动作音,一句,写具体的声音",
         "   (如\"雨点敲打金属棚顶,远处闷雷\"),视频模型会真的生成它们;",
         "   不需要就给空字符串。",
@@ -402,7 +406,8 @@ def _compose_summary_prompt(
         "12. 只输出 JSON,不要解释,不要代码块。",
         "",
         'JSON 结构:{"title": "...", "summary": "...", "music": "...", "shots": '
-        '[{"seconds": 6, "prompt": "...", "sound": "...", "narration": "..."}]}',
+        '[{"seconds": 6, "prompt": "...", "sound": "...", "narration": "...", '
+        '"continues": false}]}',
     ]
     if memory:
         # Standing preferences the user explicitly saved; skill and per-run
@@ -490,6 +495,8 @@ def _fit_shots(
                 seconds=seconds,
                 prompt=prompt,
                 narration=" ".join(draft.narration.split()),
+                # 第一镜没有可延续的对象,标了也当没标。
+                continues=bool(shots) and draft.continues,
             )
         )
     if not shots:
@@ -502,6 +509,7 @@ def storyboard_text(shots: list[ScriptShot], *, preamble: str) -> str:
     start = 0.0
     for shot in shots:
         end = start + shot.seconds
-        lines.append(f"[{start:g}s-{end:g}s] {shot.prompt}")
+        marker = "续" if shot.continues else ""
+        lines.append(f"[{start:g}s-{end:g}s{marker}] {shot.prompt}")
         start = end
     return "\n".join(lines)

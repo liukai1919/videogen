@@ -18,7 +18,7 @@ from videogen_service.models import (
     RenderRequest,
     ScriptShot,
 )
-from videogen_service.scripting import ScriptStudio
+from videogen_service.scripting import ScriptStudio, storyboard_text
 
 
 def make_config(tmp_path: Path) -> ServiceConfig:
@@ -197,6 +197,16 @@ def test_an_empty_document_is_a_client_error(tmp_path: Path) -> None:
 
 
 # ---- 导出打包 ----------------------------------------------------------------
+
+
+def test_storyboard_text_carries_continuation_markers() -> None:
+    shots = [
+        ScriptShot(seconds=6, prompt="女子起跳", narration=""),
+        ScriptShot(seconds=6, prompt="她落地", narration="", continues=True),
+    ]
+    text = storyboard_text(shots, preamble="风格")
+    assert "[0s-6s] 女子起跳" in text
+    assert "[6s-12s续] 她落地" in text
 
 
 def test_narration_srt_uses_the_padded_timeline() -> None:

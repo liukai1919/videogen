@@ -40,6 +40,8 @@ class RenderValidation(StrictModel):
 class RenderRequest(RenderSpec):
     first_frame: Path | None = None
     last_frame: Path | None = None
+    # r2v 的参考图(身份锚点),按序对应提示词里的 <Picture 1>…<Picture N>。
+    refs: list[Path] = Field(default_factory=list)
 
 
 class RenderProgress(StrictModel):
@@ -118,6 +120,9 @@ class ScriptShot(StrictModel):
     seconds: float = Field(gt=0)
     prompt: str = Field(min_length=1)
     narration: str = ""
+    # 该镜是否是上一镜同一动作的直接延续:时间轴上写成 [a s-b s续],
+    # 拆链渲染在块边界处会用上一块的最后一帧做 i2v 接力。
+    continues: bool = False
 
 
 class ScriptSource(StrictModel):

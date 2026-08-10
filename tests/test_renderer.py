@@ -15,8 +15,10 @@ from videogen_service.renderer import (
     align_length_frames,
     build_timeline,
     build_values,
+    concat_command,
     job_seed,
     parse_storyboard,
+    split_board,
     storyboard_seconds,
     validate_render,
 )
@@ -81,6 +83,140 @@ def test_storyboard_builds_director_segments() -> None:
         "胶片质感\n\n树冠",
     ]
     assert timeline["output"]["exportMode"] == "all"
+
+
+def test_long_storyboards_split_into_render_sized_chunks() -> None:
+    # 6 秒补齐 158 帧,15 秒包络补齐 362 帧:一块装得下两段,第三段开新块。
+    board = parse_storyboard(
+        "统一风格\n[0s-6s] a\n[6s-12s] b\n[12s-18s] c\n[18s-24s] d",
+        default_seconds=5,
+    )
+    plans = split_board(board, config=project_config())
+
+    assert [len(plan.board.shots) for plan in plans] == [2, 2]
+    assert all(not plan.anchored for plan in plans)
+    assert all(plan.board.preamble == "统一风格" for plan in plans)
+    assert [shot.prompt for plan in plans for shot in plan.board.shots] == [
+        "a",
+        "b",
+        "c",
+        "d",
+    ]
+
+
+def test_short_storyboards_stay_one_chunk() -> None:
+    board = parse_storyboard("[0s-6s] a\n[6s-12s] b", default_seconds=5)
+    assert len(split_board(board, config=project_config())) == 1
+
+
+def test_continuation_marker_parses_and_rides_the_shot() -> None:
+    board = parse_storyboard(
+        "[0s-6s] a\n[6s-12s续] b\n[12s-18s 接] c", default_seconds=5
+    )
+    assert [shot.cont for shot in board.shots] == [False, True, True]
+    assert [shot.prompt for shot in board.shots] == ["a", "b", "c"]
+    assert [shot.seconds for shot in board.shots] == [6.0, 6.0, 6.0]
+
+
+def test_continuation_at_chunk_boundary_becomes_an_anchored_chunk() -> None:
+    # a+b 装满一块;c 带续标记落在边界 → 单独成接力块;d 正常开新块。
+    board = parse_storyboard(
+        "[0s-6s] a\n[6s-12s] b\n[12s-18s续] c\n[18s-24s] d", default_seconds=5
+    )
+    plans = split_board(board, config=project_config())
+
+    assert [len(plan.board.shots) for plan in plans] == [2, 1, 1]
+    assert [plan.anchored for plan in plans] == [False, True, False]
+    assert plans[1].board.shots[0].prompt == "c"
+
+
+def test_continuation_inside_a_chunk_needs_no_anchor() -> None:
+    board = parse_storyboard("[0s-6s] a\n[6s-12s续] b", default_seconds=5)
+    plans = split_board(board, config=project_config())
+    assert [plan.anchored for plan in plans] == [False]
+
+
+def test_continuation_on_the_first_shot_is_ignored() -> None:
+    board = parse_storyboard("[0s-15s续] a\n[15s-30s] b", default_seconds=5)
+    plans = split_board(board, config=project_config())
+    assert [plan.anchored for plan in plans] == [False, False]
+
+
+def test_refs_ride_into_the_global_timeline() -> None:
+    board = parse_storyboard("[0s-6s] <Picture 1> 的女子", default_seconds=5)
+    timeline = build_timeline(
+        board,
+        config=project_config(),
+        width=864,
+        height=480,
+        refs_b64=["QUJD", "REVG"],
+        task_type="r2v",
+    )
+    assert timeline["global"]["taskType"] == "r2v"
+    assert timeline["global"]["refs"] == [
+        {"index": 0, "imageB64": "QUJD"},
+        {"index": 1, "imageB64": "REVG"},
+    ]
+
+
+def test_reference_validation_gates_by_mode() -> None:
+    config = project_config()
+    r2v_mode = config.modes["story"].model_copy(update={"accepts_refs": True})
+    with_r2v = config.model_copy(update={"modes": {**config.modes, "r2v": r2v_mode}})
+
+    with pytest.raises(RenderError, match="不接参考图"):
+        validate_render(
+            request(mode="story", prompt="[0s-6s] a"),
+            config=config,
+            has_first_frame=False,
+            has_last_frame=False,
+            ref_count=1,
+        )
+    with pytest.raises(RenderError, match="至少一张参考图"):
+        validate_render(
+            request(mode="r2v", prompt="[0s-6s] a"),
+            config=with_r2v,
+            has_first_frame=False,
+            has_last_frame=False,
+            ref_count=0,
+        )
+    with pytest.raises(RenderError, match="最多 9 张"):
+        validate_render(
+            request(mode="r2v", prompt="[0s-6s] a"),
+            config=with_r2v,
+            has_first_frame=False,
+            has_last_frame=False,
+            ref_count=10,
+        )
+    accepted = validate_render(
+        request(mode="r2v", prompt="[0s-6s] a"),
+        config=with_r2v,
+        has_first_frame=False,
+        has_last_frame=False,
+        ref_count=2,
+    )
+    assert accepted.timeline_mode
+
+
+def test_anchored_timeline_switches_to_gen_image_mode() -> None:
+    board = parse_storyboard("风格\n[0s-6s续] 接着跑", default_seconds=5)
+    timeline = build_timeline(
+        board, config=project_config(), width=864, height=480, anchor_b64="UE5H"
+    )
+
+    assert timeline["timelineMode"] == "gen_image"
+    assert timeline["global"]["taskType"] == "i2v"
+    segment = timeline["segments"][0]
+    assert segment["taskType"] == "i2v"
+    assert segment["genImage"] == {"imageB64": "UE5H"}
+
+
+def test_chunk_concat_copies_streams_without_reencoding() -> None:
+    command = concat_command("list.txt", "joined.mp4")
+    assert command[0] == "ffmpeg"
+    assert command[command.index("-f") + 1] == "concat"
+    assert command[command.index("-c") + 1] == "copy"
+    assert command[-1] == "joined.mp4"
 
 
 def test_continuity_flag_rides_from_config_into_the_timeline() -> None:

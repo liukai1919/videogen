@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from videogen_service.api import create_app
 from videogen_service.artifacts import write_bytes_atomic
+from videogen_service.assets import AssetStore
 from videogen_service.config import Capability, ServiceConfig
 from videogen_service.jobs import JobSpec
 from videogen_service.memory import MemoryStore
@@ -44,6 +45,11 @@ def make_config(tmp_path: Path) -> ServiceConfig:
                 },
                 "story": {
                     "workflow_file": str(tmp_path / "story.json"),
+                    "inputs": {"prompt": ["1.text"], "timeline": ["1.timeline"]},
+                },
+                "r2v": {
+                    "workflow_file": str(tmp_path / "r2v.json"),
+                    "accepts_refs": True,
                     "inputs": {"prompt": ["1.text"], "timeline": ["1.timeline"]},
                 },
             },
@@ -237,8 +243,8 @@ def test_storyboard_and_video_tools_compose(tmp_path: Path) -> None:
 
 
 def test_the_render_envelope_guard_blocks_oom_specs(tmp_path: Path) -> None:
-    # 2026-08-09 的两种真实死法:1080p 在模型加载阶段 OOM,30 秒双段 story
-    # 渲染中途 OOM。守卫要在排队之前把它们拦下来,并让模型读得懂原因。
+    # 2026-08-09 的真实死法:1080p 在模型加载阶段 OOM。直渲超限被拦;
+    # 长 story 现在合法——渲染器自动拆成安全大小的块,守卫放行。
     chat = ScriptedChat(
         [
             {
@@ -260,11 +266,20 @@ def test_the_render_envelope_guard_blocks_oom_specs(tmp_path: Path) -> None:
                 "tool_calls": [
                     tool_call(
                         "generate_video",
+                        {"mode": "t2v", "prompt": "夜景", "seconds": 30},
+                    )
+                ],
+            },
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
                         {"mode": "story", "prompt": "[0s-15s] 开场\n[15s-30s] 结尾"},
                     )
                 ],
             },
-            {"content": "两条都超本机红线,没有排渲染。"},
+            {"content": "1080p 和 30 秒 t2v 被拦,30 秒 story 已拆块排上。"},
         ]
     )
     with make_client(tmp_path, chat) as client:
@@ -275,10 +290,53 @@ def test_the_render_envelope_guard_blocks_oom_specs(tmp_path: Path) -> None:
         ).json()
         resolution = json.loads(record["messages"][2]["content"])
         duration = json.loads(record["messages"][4]["content"])
+        story = json.loads(record["messages"][6]["content"])
         assert "864x480" in resolution["error"]
         assert "15" in duration["error"]
-        # Nothing slipped past the guard into the queue.
-        assert client.get("/v1/renders").json() == []
+        assert story.get("error") is None and story["render_id"]
+        # Only the chunk-safe story render reached the queue.
+        renders = client.get("/v1/renders").json()
+        assert [entry["render_id"] for entry in renders] == [story["render_id"]]
+
+
+def test_r2v_reference_render_carries_asset_images(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    asset = AssetStore(config.work_dir).create(
+        name="女主定妆照", category="角色", filename="face.png", data=b"PNG"
+    )
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
+                        {
+                            "mode": "r2v",
+                            "prompt": "[0s-6s] <Picture 1> 的红衣女子走进咖啡馆",
+                            "ref_assets": [asset.asset_id],
+                        },
+                    )
+                ],
+            },
+            {"content": "参考渲染排上了。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "用定妆照锁脸生成"}
+        ).json()
+        video = json.loads(record["messages"][2]["content"])
+        assert video.get("error") is None and video["render_id"]
+
+    # The stored request carries the reference image for retries.
+    stored = json.loads(
+        (config.work_dir / video["render_id"] / "request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [Path(ref).name for ref in stored["refs"]] == ["ref0.png"]
 
 
 def test_a_broken_tool_reports_instead_of_crashing(tmp_path: Path) -> None:

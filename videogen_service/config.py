@@ -7,7 +7,7 @@ import yaml
 
 from videogen_service.agents.config import AgentDefaults, AgentWorkerConfig
 
-RenderMode = Literal["t2v", "i2v", "flf2v", "story"]
+RenderMode = Literal["t2v", "i2v", "flf2v", "story", "r2v"]
 
 
 class StrictModel(BaseModel):
@@ -124,6 +124,9 @@ Capability = ComfyCapability | CommandCapability
 class ModeConfig(StrictModel):
     workflow_file: Path
     inputs: dict[str, list[str]]
+    # 参考主体生视频(r2v):接受参考图并要求至少一张,提示词用 <Picture N>
+    # 引用。需要 ref2va 权重的 workflow;fl2va 系模式保持 False。
+    accepts_refs: bool = False
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "ModeConfig":

@@ -85,6 +85,9 @@ class JobSpec(StrictModel):
         default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$"
     )
     subtitles: str | None = Field(default=None, min_length=1, max_length=100_000)
+    # 成片放大目标高度(如 1080),宽按比例。官方 2K 也是渲后放大的路线;
+    # 本机直渲超 864x480 会 OOM,高清一律走这里。
+    upscale_height: int | None = Field(default=None, ge=480, le=2160)
 
 
 class ComposeCapability(StrictModel):
@@ -178,6 +181,7 @@ class LocalJobRunner:
             subtitles=subtitles_name,
             output="output.mp4",
             mix_native=audio is not None and _has_audio_stream(video),
+            upscale_height=spec.upscale_height,
         )
         try:
             completed = subprocess.run(
@@ -315,8 +319,15 @@ class JobService:
         if capability.kind == "compose":
             if spec.render_id is None:
                 raise JobError("compose 任务需要 render_id")
-            if spec.audio_job_id is None and spec.subtitles is None:
-                raise JobError("compose 任务至少需要配音(audio_job_id)或字幕(subtitles)")
+            if (
+                spec.audio_job_id is None
+                and spec.subtitles is None
+                and spec.upscale_height is None
+            ):
+                raise JobError(
+                    "compose 任务至少需要配音(audio_job_id)、字幕(subtitles)"
+                    "或放大(upscale_height)之一"
+                )
         with self._lock:
             if self._load(spec.job_id) is not None:
                 raise JobConflict(f"job id {spec.job_id} 已存在")
@@ -516,6 +527,7 @@ def ffmpeg_command(
     subtitles: str | None,
     output: str,
     mix_native: bool = False,
+    upscale_height: int | None = None,
 ) -> list[str]:
     """The composition command, kept pure for tests. Runs with cwd at the job
     directory, so `subtitles`/`output` are bare filenames and the subtitles
@@ -523,12 +535,17 @@ def ffmpeg_command(
     command = ["ffmpeg", "-hide_banner", "-y", "-i", str(video)]
     if audio is not None:
         command += ["-i", str(audio)]
+    # 先放大后烧字幕,字幕在目标分辨率下才够锐。任一滤镜都要求重编码;
+    # 都没有时视频流原样拷贝。
+    filters: list[str] = []
+    if upscale_height is not None:
+        filters.append(f"scale=-2:{upscale_height}:flags=lanczos")
     if subtitles is not None:
-        # Burning subtitles re-encodes the video; without them the stream is
-        # copied untouched.
+        filters.append(f"subtitles={subtitles}")
+    if filters:
         command += [
             "-vf",
-            f"subtitles={subtitles}",
+            ",".join(filters),
             "-c:v",
             "libx264",
             "-preset",

@@ -43,11 +43,7 @@ from videogen_service.jobs import (
 )
 from videogen_service.memory import MemoryStore
 from videogen_service.models import RenderSpec, ScriptOptions
-from videogen_service.renderer import (
-    RenderError,
-    parse_storyboard,
-    storyboard_seconds,
-)
+from videogen_service.renderer import RenderError, is_timeline_mode
 from videogen_service.scripting import ScriptError, ScriptStudio
 from videogen_service.service import (
     RenderConflict,
@@ -353,18 +349,27 @@ class ToolBox:
             tool(
                 "generate_video",
                 "排一条 H3 视频渲染,立即返回 render_id;用 check_render 查进度。"
-                "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴;"
+                "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴,总时长可到 "
+                f"{self._config.renderer.max_total_seconds:g} 秒(内部自动拆成 ≤"
+                f"{self._config.renderer.max_seconds:g} 秒的块串行渲染);"
                 "图生视频用 i2v 并给 first_frame_asset。"
-                f"本机上限 864x480、单条总时长 ≤"
+                "本机分辨率上限 864x480,其他模式单条 ≤"
                 f"{self._config.renderer.max_seconds:g} 秒,超限直接报错。",
                 {
-                    "mode": {**text, "description": "t2v/i2v/flf2v/story"},
+                    "mode": {**text, "description": "t2v/i2v/flf2v/story/r2v"},
                     "prompt": text,
                     "seconds": {"type": "number"},
                     "width": integer,
                     "height": integer,
                     "first_frame_asset": {**text, "description": "资产 id,i2v/flf2v 用"},
                     "last_frame_asset": {**text, "description": "资产 id,flf2v 用"},
+                    "ref_assets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "资产 id 列表(≤9),r2v 参考生成用:"
+                        "参考图锁定角色/物体身份,提示词里按序用"
+                        " <Picture 1>…<Picture N> 引用",
+                    },
                 },
                 ["mode", "prompt"],
             ),
@@ -381,13 +386,18 @@ class ToolBox:
             ),
             tool(
                 "compose_video",
-                "用 FFmpeg 把一条完成的渲染合成为成片:换上配音音轨、烧入字幕。"
-                "配音先用 generate_speech 生成,字幕用 write_storyboard 返回的"
-                " narration_srt。立即返回 job_id。",
+                "用 FFmpeg 把一条完成的渲染合成为成片:配音解说压混在 H3 原生"
+                "音轨上、烧入字幕、放大到高清。配音先用 generate_speech 生成,"
+                "字幕用 write_storyboard 返回的 narration_srt;用户要 1080p 就传"
+                " upscale_height=1080(渲染本身保持 864x480)。立即返回 job_id。",
                 {
                     "render_id": {**text, "description": "已完成的渲染 id"},
                     "audio_job_id": {**text, "description": "配音任务 id,可省略"},
                     "subtitles_srt": {**text, "description": "SRT 字幕原文,可省略"},
+                    "upscale_height": {
+                        **integer,
+                        "description": "放大目标高度(如 1080),宽按比例,可省略",
+                    },
                 },
                 ["render_id"],
             ),
@@ -503,38 +513,39 @@ class ToolBox:
             seconds=float(arguments.get("seconds") or 6.0),
         )
         self._guard_render_envelope(spec)
+        raw_refs = arguments.get("ref_assets")
+        refs = [
+            frame
+            for asset_id in (raw_refs if isinstance(raw_refs, list) else [])
+            if (frame := self._asset_frame(asset_id)) is not None
+        ]
         view = self._renders.submit(
             spec,
             first_frame=self._asset_frame(arguments.get("first_frame_asset")),
             last_frame=self._asset_frame(arguments.get("last_frame_asset")),
+            refs=refs or None,
         )
         return {"render_id": view.render_id, "status": view.status}
 
     def _guard_render_envelope(self, spec: RenderSpec) -> None:
         """The machine's OOM red lines, enforced where the agent queues work.
         The manual workbench path stays unrestricted — a person typing into
-        the form is deliberate; a model relaying "4k画质" is not."""
+        the form is deliberate; a model relaying "4k画质" is not. story 的
+        时长不在这里管:渲染器会把长分镜拆成安全大小的块串行渲染,总长
+        上限由 validate_storyboard 在提交时把关。"""
         if spec.width * spec.height > _MAX_RENDER_PIXELS:
             raise ValueError(
                 f"分辨率 {spec.width}x{spec.height} 超过本机内存红线"
                 "(最高 864x480 的像素量,1080p 实测必 OOM);"
-                "请用 864x480 渲染,需要高清就在成片阶段放大。"
+                "请用 864x480 渲染,compose_video 传 upscale_height 放大成片。"
             )
         limit = self._config.renderer.max_seconds
-        if spec.mode == "story":
-            board = parse_storyboard(spec.prompt, default_seconds=spec.seconds)
-            total = storyboard_seconds(board, fps=self._config.renderer.fps)
-            # +1s 容忍渲染器把每段对齐到 H3 长度台阶产生的零头。
-            if total > limit + 1.0:
-                raise ValueError(
-                    f"这条 story 总时长约 {total:g} 秒,超过本机单条渲染红线"
-                    f" ≤{limit:g} 秒(30 秒双段实测 OOM);"
-                    f"请拆成多条 ≤{limit:g} 秒的渲染分别提交。"
-                )
-        elif spec.seconds > limit:
+        mode_settings = self._config.modes.get(spec.mode)
+        timeline = mode_settings is not None and is_timeline_mode(mode_settings)
+        if not timeline and spec.seconds > limit:
             raise ValueError(
                 f"{spec.seconds:g} 秒超过本机单条渲染红线 ≤{limit:g} 秒;"
-                "请缩短或拆成多条渲染。"
+                "请缩短,或改用 story 分镜(会自动拆块串行渲染)。"
             )
 
     def _compose_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -549,6 +560,7 @@ class ToolBox:
                 else None
             ),
             subtitles=str(subtitles) if subtitles else None,
+            upscale_height=_optional_int(arguments.get("upscale_height")),
         )
         view = self._jobs.submit(spec)
         return {"job_id": view.job_id, "status": view.status}
@@ -873,9 +885,11 @@ class AgentService:
             "只在用户明确要求记住偏好时调用 save_memory。",
             "回答用用户的语言,默认中文。",
             "",
-            "本机硬性红线(实测,超限会 OOM 击杀渲染后端):分辨率最高 864x480,",
-            f"单条渲染总时长 ≤{limit:g} 秒。用户要 1080p/4k 时,用 864x480 渲染,",
-            f"高清放到成片阶段解决;更长的片子拆成多条 ≤{limit:g} 秒的渲染。",
+            "本机硬性红线(实测,超限会 OOM 击杀渲染后端):分辨率最高 864x480。",
+            f"story 分镜总长可到 {self._config.renderer.max_total_seconds:g} 秒,",
+            f"渲染器会自动拆成 ≤{limit:g} 秒的块串行渲染再拼接;其他模式单条",
+            f" ≤{limit:g} 秒。用户要 1080p/4k 时照常用 864x480 渲染,",
+            "compose_video 传 upscale_height=1080 在成片阶段放大。",
             "",
             "写视频画面提示词(generate_video 的 prompt)时:每段两到四句,写具体:",
             "先主体和动作(谁、在哪、做什么),镜头运动用类型+幅度+速度",
@@ -886,6 +900,11 @@ class AgentService:
             "H3 会原生生成音频:段内可写\"音效:具体声音\"(如雨声、金属剐蹭),",
             "开头无时间戳的全局行可写\"配乐:配器/速度/节奏\";写了才有指挥,",
             "不写模型就自己瞎配。",
+            "某一镜是上一镜同一动作的无缝延续时,时间轴写成 [12s-18s续]:",
+            "跨块渲染会用上一镜的最后一帧接力,动作不断线;场景切换别标。",
+            "角色要跨条锁脸时用 r2v 模式:ref_assets 给资产中心的定妆图 id,",
+            "提示词里按序用 <Picture 1> 引用它(如\"<Picture 1> 中的红衣女子",
+            "走进咖啡馆\");首次出现描述一次外观,之后只用标签。",
         ]
         preferences = self._memory.texts()
         if preferences:

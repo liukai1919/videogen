@@ -129,3 +129,16 @@ modes:
       length: ["5.total_frames"]
       seed: ["5.seed"]
       timeline: ["5.timeline_data"]
+  # r2v:
+  #   # 参考主体生视频:参考图锁角色/物体身份,提示词用 <Picture 1> 引用。
+  #   # 需要 ref2va 权重(Comfy-Org/MiniMax-H3 的
+  #   # minimax_h3_ref2va_pruned_int8_convrot.safetensors, 约 21GB)。
+  #   workflow_file: "./workflows/minimax_h3_r2v.json"
+  #   accepts_refs: true
+  #   inputs:
+  #     prompt: ["5.global_prompt"]
+  #     width: ["5.width"]
+  #     height: ["5.height"]
+  #     length: ["5.total_frames"]
+  #     seed: ["5.seed"]
+  #     timeline: ["5.timeline_data"]

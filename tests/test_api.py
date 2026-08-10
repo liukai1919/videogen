@@ -180,7 +180,8 @@ def test_health_describes_the_renderer_contract(tmp_path: Path) -> None:
         "length_offset": 5,
         "shot_header_pattern": (
             r"^\[\s*(\d+(?:\.\d+)?)\s*s?\s*(?:[-–—~～]\s*"
-            r"(\d+(?:\.\d+)?)\s*s?\s*)?\]\s*(.*)$"
+            r"(\d+(?:\.\d+)?)\s*s?\s*)?"
+            r"\s*(续|接)?\s*\]\s*(.*)$"
         ),
     }
 

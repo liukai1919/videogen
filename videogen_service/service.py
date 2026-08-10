@@ -144,6 +144,7 @@ class RenderService:
         *,
         first_frame: tuple[str, bytes] | None,
         last_frame: tuple[str, bytes] | None,
+        refs: list[tuple[str, bytes]] | None = None,
     ) -> RenderView:
         if self._closing.is_set():
             raise RenderConflict("渲染服务正在关闭")
@@ -152,11 +153,14 @@ class RenderService:
             config=self._config,
             has_first_frame=first_frame is not None,
             has_last_frame=last_frame is not None,
+            ref_count=len(refs or []),
         )
         # The validated duration is canonical: storyboard requests are aligned
         # shot-by-shot and the control plane must observe that exact total.
         spec = spec.model_copy(update={"seconds": validation.seconds})
-        fingerprint = _fingerprint(spec, first_frame=first_frame, last_frame=last_frame)
+        fingerprint = _fingerprint(
+            spec, first_frame=first_frame, last_frame=last_frame, refs=refs
+        )
         with self._state_lock:
             if self._closing.is_set():
                 raise RenderConflict("渲染服务正在关闭")
@@ -174,7 +178,7 @@ class RenderService:
                     else:
                         return self._view(existing)
             request = self._store_request(
-                spec, first_frame=first_frame, last_frame=last_frame
+                spec, first_frame=first_frame, last_frame=last_frame, refs=refs
             )
             now = _now()
             record = RenderRecord(
@@ -369,13 +373,22 @@ class RenderService:
         *,
         first_frame: tuple[str, bytes] | None,
         last_frame: tuple[str, bytes] | None,
+        refs: list[tuple[str, bytes]] | None = None,
     ) -> RenderRequest:
         directory = self._render_dir(spec.render_id)
         directory.mkdir(parents=True, exist_ok=True)
         first_path = self._store_frame(directory, "first", first_frame)
         last_path = self._store_frame(directory, "last", last_frame)
+        ref_paths = [
+            path
+            for index, ref in enumerate(refs or [])
+            if (path := self._store_frame(directory, f"ref{index}", ref)) is not None
+        ]
         request = RenderRequest(
-            **spec.model_dump(), first_frame=first_path, last_frame=last_path
+            **spec.model_dump(),
+            first_frame=first_path,
+            last_frame=last_path,
+            refs=ref_paths,
         )
         write_json_atomic(
             directory / "request.json", request.model_dump(mode="json")
@@ -487,13 +500,14 @@ def _fingerprint(
     *,
     first_frame: tuple[str, bytes] | None,
     last_frame: tuple[str, bytes] | None,
+    refs: list[tuple[str, bytes]] | None = None,
 ) -> str:
     digest = hashlib.sha256(
         json.dumps(
             spec.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
     )
-    for frame in (first_frame, last_frame):
+    for frame in (first_frame, last_frame, *(refs or [])):
         digest.update(b"\0")
         if frame is not None:
             digest.update(frame[1])

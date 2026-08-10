@@ -727,6 +727,8 @@ def create_app(
         # is untouched; an uploaded file wins over an asset id.
         first_frame_asset: str | None = Form(None),
         last_frame_asset: str | None = Form(None),
+        # r2v 的身份参考图:资产 id,逗号分隔,顺序即 <Picture 1>…<Picture N>。
+        ref_assets: str | None = Form(None),
     ) -> RenderView:
         try:
             spec = RenderSpec.model_validate(
@@ -740,12 +742,19 @@ def create_app(
                     "seed": seed,
                 }
             )
+            refs = [
+                frame
+                for asset_id in (ref_assets or "").split(",")
+                if asset_id.strip()
+                and (frame := _asset_frame(assets, asset_id.strip())) is not None
+            ]
             return service.submit(
                 spec,
                 first_frame=await _read_upload(first_frame)
                 or _asset_frame(assets, first_frame_asset),
                 last_frame=await _read_upload(last_frame)
                 or _asset_frame(assets, last_frame_asset),
+                refs=refs or None,
             )
         except AssetNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
