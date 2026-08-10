@@ -6,6 +6,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import re
 import shutil
+import subprocess
 from threading import Event, Lock, Thread
 
 from videogen_service.artifacts import write_bytes_atomic, write_json_atomic
@@ -288,19 +289,31 @@ class RenderService:
         return request.prompt if request is not None else None
 
     def frame_path(self, render_id: str, slot: str) -> Path:
-        """Where a submitted render's reference frame lives, for archival
-        into the asset center."""
+        """Where a render's frame lives, for archival into the asset center.
+        上传过的输入参考帧优先;没有就从成片 output.mp4 现抽一帧
+        (定妆照、风格钥匙都从这里出)。"""
         with self._state_lock:
             if self._load_record(render_id) is None:
                 raise RenderNotFound(f"render {render_id} 不存在")
-            request = self._read_request(self._render_dir(render_id))
-            if request is None:
-                raise RenderNotFound(f"render {render_id} 的请求已经不在了")
-            path = request.first_frame if slot == "first" else request.last_frame
-            if path is None or not path.is_file():
+            directory = self._render_dir(render_id)
+            request = self._read_request(directory)
+            stored = (
+                (request.first_frame if slot == "first" else request.last_frame)
+                if request is not None
+                else None
+            )
+            if stored is not None and stored.is_file():
+                return stored
+            video = directory / "output.mp4"
+            if not video.is_file():
                 slot_name = "首帧" if slot == "first" else "尾帧"
-                raise RenderNotFound(f"render {render_id} 没有{slot_name}参考图")
-            return path
+                raise RenderNotFound(
+                    f"render {render_id} 没有{slot_name}参考图,也没有成片可抽帧"
+                )
+            target = directory / f"out_{slot}.png"
+            if not target.is_file():
+                _extract_output_frame(video, slot=slot, target=target)
+            return target
 
     def media_path(self, render_id: str) -> Path:
         with self._state_lock:
@@ -569,6 +582,23 @@ class RenderService:
                 else None
             ),
         )
+
+
+def _extract_output_frame(video: Path, *, slot: str, target: Path) -> None:
+    """从成片抽首帧或尾帧存成 PNG(FFmpeg,CPU)。"""
+    args = ["ffmpeg", "-y"]
+    if slot == "last":
+        args += ["-sseof", "-0.5"]
+    args += ["-i", str(video), "-frames:v", "1", str(target)]
+    try:
+        completed = subprocess.run(args, capture_output=True, timeout=60)
+    except FileNotFoundError as error:
+        raise RenderNotFound("抽帧需要 ffmpeg,请先安装并放进 PATH") from error
+    except subprocess.TimeoutExpired as error:
+        raise RenderNotFound("成片抽帧超时(60s)") from error
+    if completed.returncode != 0 or not target.is_file():
+        detail = completed.stderr.decode("utf-8", errors="replace")[-200:]
+        raise RenderNotFound(f"成片抽帧失败: {detail}")
 
 
 def _fingerprint(

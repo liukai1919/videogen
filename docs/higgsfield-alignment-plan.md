@@ -80,6 +80,18 @@ negative_prompt / 每段 refs / prompt_enhance 三个官方能力没接线。
 
 验收：4.1——同一脚本两种配置各出一片，eval 打分可见一致性差异；4.2——每个成片自动带一份评分卡，Release Review 页可见。
 
+**M4 落地记（2026-08-10）：**
+- 4.2 ✓ **review 内建能力全线打通**：FFmpeg 抽 6 帧(CPU) + qwen3.6 原生多模态
+  打分(实测有视觉能力,零新模型),hook/consistency/visual_quality/alignment
+  各 1-10 + 中文评语;真机 45 秒/次,评语能独立发现"首镜俯视 vs 分镜仰摇"
+  级别的真实意图偏差。agent 工具 review_video + check_job 直接带回分数;
+  工作台评分卡 UI 留待后续(评分任务已在任务网格可见)。
+- 4.1 通道与玩法 ✓：save_render_frame_as_asset(frame_path 增成片抽帧回退,
+  定妆照/风格钥匙的生产入口)+ segment_ref_assets + 系统提示玩法注入。
+  **A/B 结果(24s 双块,同 seed)：无显著差异**——consistency 9 vs 9,现有
+  一致性机制在此工况已到 9 分天花板。通道保留,待 60-120s 多块长片复测;
+  不进 DECISIONS。
+
 ---
 
 ## 顺序与依赖
