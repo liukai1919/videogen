@@ -15,6 +15,7 @@ from queue import Empty, Queue
 import re
 import shutil
 import subprocess
+import sys
 from threading import Event, Lock, Thread
 from typing import Literal, Protocol
 
@@ -26,6 +27,7 @@ import urllib.request
 from urllib.error import HTTPError, URLError
 
 from videogen_service.artifacts import write_bytes_atomic, write_json_atomic
+from videogen_service.assets import AssetNotFound, AssetStore
 from videogen_service.braingate import BrainGate
 from videogen_service.comfyui import ComfyUiClient, load_workflow, patch_workflow
 from videogen_service.config import (
@@ -43,6 +45,17 @@ _JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 # 不进 config,因为它不依赖任何模型,只要机器上有 ffmpeg。
 COMPOSE_CAPABILITY_ID = "compose"
 REVIEW_CAPABILITY_ID = "review"
+# 白板手绘动画也是内建能力:vendored 引擎(vendor/srt-whiteboard,MIT)把
+# 线稿资产 + 标注 JSON 逐笔绘制成 MP4。纯 CPU,渲染不占 GPU 闸门;
+# H.264 转码复用系统 ffmpeg。锁定版本见 vendor/srt-whiteboard/VENDOR.md。
+WHITEBOARD_CAPABILITY_ID = "whiteboard"
+WHITEBOARD_ENGINE_DIR = (
+    Path(__file__).resolve().parent.parent / "vendor" / "srt-whiteboard"
+)
+# 上游手部素材的笔杆带作者签名,违反"画面不出现文字/水印"的纪律;
+# 这份是修掉文字的版本(vendor 原件不动,来历见 VENDOR.md)。
+_WHITEBOARD_HAND = Path(__file__).resolve().parent / "static" / "whiteboard-hand.png"
+_WHITEBOARD_TIMEOUT_SECONDS = 1800.0
 # 评分抽帧数与送模型的长边:6 帧足以覆盖跨段一致性,448px 控制显存与延迟。
 _REVIEW_FRAMES = 6
 _REVIEW_FRAME_EDGE = 448
@@ -98,6 +111,10 @@ class JobSpec(StrictModel):
     # 成片放大目标高度(如 1080),宽按比例。官方 2K 也是渲后放大的路线;
     # 本机直渲超 864x480 会 OOM,高清一律走这里。
     upscale_height: int | None = Field(default=None, ge=480, le=2160)
+    # whiteboard uses these: the line-art image from the asset library, and
+    # the annotation JSON (regions + reveal timing) as text.
+    asset_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    annotation: str | None = Field(default=None, min_length=2, max_length=200_000)
 
 
 class ComposeCapability(StrictModel):
@@ -113,7 +130,17 @@ class ReviewCapability(StrictModel):
     needs_gpu: bool = True
 
 
-AnyCapability = Capability | ComposeCapability | ReviewCapability
+class WhiteboardCapability(StrictModel):
+    """白板手绘动画:线稿资产 + 标注 JSON 逐笔绘制成 MP4(vendored 引擎)。
+    OpenCV 在 CPU 上跑,可与 GPU 渲染并行。"""
+
+    kind: Literal["whiteboard"] = "whiteboard"
+    needs_gpu: bool = False
+
+
+AnyCapability = (
+    Capability | ComposeCapability | ReviewCapability | WhiteboardCapability
+)
 
 
 class JobRecord(StrictModel):
@@ -142,6 +169,7 @@ class JobView(StrictModel):
     seed: int | None = None
     render_id: str | None = None
     audio_job_id: str | None = None
+    asset_id: str | None = None
     created_at: str
     updated_at: str
 
@@ -165,10 +193,12 @@ class LocalJobRunner:
         config: ServiceConfig,
         *,
         renders: RenderService | None = None,
+        assets: AssetStore | None = None,
         brain_gate: BrainGate | None = None,
     ) -> None:
         self._config = config
         self._renders = renders
+        self._assets = assets
         self._brain_gate = brain_gate
 
     def run(
@@ -180,6 +210,8 @@ class LocalJobRunner:
             return self._run_compose(spec, directory=directory)
         if isinstance(capability, ReviewCapability):
             return self._run_review(spec, directory=directory)
+        if isinstance(capability, WhiteboardCapability):
+            return self._run_whiteboard(spec, directory=directory)
         return self._run_command(spec, capability, directory=directory)
 
     def _run_review(self, spec: JobSpec, *, directory: Path) -> str:
@@ -304,6 +336,60 @@ class LocalJobRunner:
             raise JobError("ffmpeg 结束了但没有产出成片")
         return "output.mp4"
 
+    def _run_whiteboard(self, spec: JobSpec, *, directory: Path) -> str:
+        if self._assets is None:
+            raise JobError("白板任务需要资产库在场")
+        try:
+            image = self._assets.media_path(spec.asset_id or "")
+        except AssetNotFound as error:
+            raise JobError(str(error)) from error
+        annotation = whiteboard_annotation(spec.annotation)
+        write_bytes_atomic(
+            directory / "annotation.json",
+            json.dumps(annotation, ensure_ascii=False).encode("utf-8"),
+        )
+        script = (
+            WHITEBOARD_ENGINE_DIR / "scripts" / "render_stream_whiteboard.py"
+        )
+        if not script.is_file():
+            raise JobError(
+                "白板引擎不在位:vendor/srt-whiteboard 缺失,见其 VENDOR.md"
+            )
+        # 引擎自己解析相对路径:cwd 设为任务目录,标注和产物都留在任务内。
+        command = [
+            sys.executable,
+            str(script),
+            str(image),
+            "annotation.json",
+            "whiteboard.mp4",
+        ]
+        if _WHITEBOARD_HAND.is_file():
+            command.append(str(_WHITEBOARD_HAND))
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=directory,
+                capture_output=True,
+                timeout=_WHITEBOARD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise JobError(
+                f"白板渲染超时({_WHITEBOARD_TIMEOUT_SECONDS:.0f}s)"
+            ) from error
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace")[-600:]
+            raise JobError(f"白板渲染退出码 {completed.returncode}: {detail}")
+        output = directory / "whiteboard.mp4"
+        if not output.is_file() or output.stat().st_size == 0:
+            # 机器上既无 ffmpeg 也无 PyAV 时,引擎保留 mp4v 原始产物
+            # (whiteboard_raw.mp4)而不写最终名,认下这份产物。
+            fallback = directory / "whiteboard_raw.mp4"
+            if fallback.is_file() and fallback.stat().st_size > 0:
+                return fallback.name
+            raise JobError("白板渲染结束了但没有产出视频")
+        return "whiteboard.mp4"
+
     def _run_comfy(
         self, spec: JobSpec, capability: ComfyCapability, *, directory: Path
     ) -> str:
@@ -417,6 +503,12 @@ class JobService:
             raise JobError("tts 任务需要 text")
         if capability.kind == "review" and spec.render_id is None:
             raise JobError("review 任务需要 render_id")
+        if capability.kind == "whiteboard":
+            if spec.asset_id is None:
+                raise JobError("whiteboard 任务需要 asset_id(线稿图资产)")
+            # 提交口就把标注 JSON 掰开验一遍:Agent 手写的标注坏在请求上,
+            # 别坏在队列里。
+            whiteboard_annotation(spec.annotation)
         if capability.kind == "compose":
             if spec.render_id is None:
                 raise JobError("compose 任务需要 render_id")
@@ -552,11 +644,13 @@ class JobService:
             return ComposeCapability()
         if capability_id == REVIEW_CAPABILITY_ID:
             return ReviewCapability()
+        if capability_id == WHITEBOARD_CAPABILITY_ID:
+            return WhiteboardCapability()
         capability = self._config.capabilities.get(capability_id)
         if capability is None:
             raise JobError(
                 f"未配置的能力: {capability_id};可用: "
-                f"{sorted([*self._config.capabilities, COMPOSE_CAPABILITY_ID, REVIEW_CAPABILITY_ID])}"
+                f"{sorted([*self._config.capabilities, COMPOSE_CAPABILITY_ID, REVIEW_CAPABILITY_ID, WHITEBOARD_CAPABILITY_ID])}"
             )
         return capability
 
@@ -770,6 +864,33 @@ def _extract_review_json(content: str) -> dict[str, object]:
     return scores
 
 
+def whiteboard_annotation(text: str | None) -> dict[str, object]:
+    """标注 JSON 的形状检查:引擎按 elements[].reveal.startMs/durationMs
+    排序取时,缺了会在渲染中段崩栈,这里提前拦成一句人话。"""
+    if text is None:
+        raise JobError("whiteboard 任务需要 annotation(标注 JSON)")
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise JobError(f"annotation 不是合法 JSON: {error}") from error
+    if not isinstance(document, dict):
+        raise JobError("annotation 必须是 JSON 对象")
+    elements = document.get("elements")
+    if not isinstance(elements, list) or not elements:
+        raise JobError("annotation.elements 必须是非空数组")
+    for index, element in enumerate(elements):
+        reveal = element.get("reveal") if isinstance(element, dict) else None
+        if (
+            not isinstance(reveal, dict)
+            or not isinstance(reveal.get("startMs"), int | float)
+            or not isinstance(reveal.get("durationMs"), int | float)
+        ):
+            raise JobError(
+                f"annotation.elements[{index}].reveal 需要数值 startMs/durationMs"
+            )
+    return document
+
+
 def _audio_output(directory: Path) -> Path:
     for candidate in sorted(directory.glob("output.*")):
         if candidate.suffix.lower() in {".wav", ".mp3", ".flac", ".ogg"}:
@@ -799,6 +920,7 @@ def _view(record: JobRecord) -> JobView:
         seed=spec.seed,
         render_id=spec.render_id,
         audio_job_id=spec.audio_job_id,
+        asset_id=spec.asset_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )

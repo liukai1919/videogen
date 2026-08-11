@@ -5,6 +5,7 @@
 # launcher scripts call this before handing over to uvicorn.
 
 from collections.abc import Callable
+import importlib
 import json
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -15,6 +16,7 @@ import urllib.request
 from videogen_service.agents import AgentWorkerError, CliAgentAdapter, build_manager
 from videogen_service.comfyui import ComfyUiError, load_workflow
 from videogen_service.config import ServiceConfig
+from videogen_service.jobs import WHITEBOARD_ENGINE_DIR
 
 Status = Literal["ok", "warn", "fail"]
 
@@ -52,6 +54,7 @@ def run_checks(
         _check_comfyui(config, probe),
         _check_ollama(config, probe),
         _check_yt_dlp(config),
+        _check_whiteboard(),
         *_check_agents(config),
     ]
 
@@ -114,6 +117,30 @@ def _check_workflows(config: ServiceConfig) -> list[Check]:
             continue
         checks.append(Check(name, "ok", settings.workflow_file.name))
     return checks
+
+
+def _check_whiteboard() -> Check:
+    name = "白板引擎"
+    script = WHITEBOARD_ENGINE_DIR / "scripts" / "render_stream_whiteboard.py"
+    hand = WHITEBOARD_ENGINE_DIR / "assets" / "drawing-hand.png"
+    if not script.is_file() or not hand.is_file():
+        return Check(
+            name,
+            "warn",
+            "vendor/srt-whiteboard 缺失;whiteboard 任务会失败,其余能力不受影响",
+        )
+    # 动态探测:依赖缺失只降级成提醒,不拦着服务启动;引擎在包外跑
+    # 子进程,服务代码不静态依赖 cv2/numpy 的类型。
+    for module in ("cv2", "numpy"):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            return Check(
+                name,
+                "warn",
+                f"渲染依赖缺失({module});重装依赖即可: pip install -e .",
+            )
+    return Check(name, "ok", "vendor/srt-whiteboard + opencv")
 
 
 def _check_comfyui(config: ServiceConfig, probe: Callable[[str], Probe]) -> Check:

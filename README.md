@@ -126,8 +126,8 @@ Copy-Item config.example.yaml config.yaml
 - `GET/POST /v1/assets`、`POST /v1/assets/from-render`、`GET /v1/assets/{id}/media`、`DELETE /v1/assets/{id}`：资产中心，见下文。
 - `GET/POST /v1/memory`、`DELETE /v1/memory/{entry_id}`：长期创作偏好，每次起稿自动注入总结 Prompt。
 - `POST/GET /v1/chats`、`GET/DELETE /v1/chats/{id}`、`POST /v1/chats/{id}/messages`：Agent 对话，见上文。
-- `GET /v1/capabilities`：平台能力目录——H3 视频各模式（提交走 `/v1/renders`，附参数事实表：分段/总长界限、像素红线、是否接参考图/段级参考图，与实际校验逻辑同源）加上 config `capabilities` 里声明的本地能力（文生图、TTS，提交走 `/v1/jobs`），以及内建的 `compose`（合成）、`review`（评分）两个能力。
-- `POST/GET /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs/{id}/media`、`POST /v1/jobs/{id}/retry`、`DELETE /v1/jobs/{id}`、`POST /v1/jobs/{id}/save-asset`：通用生成任务队列。t2i 走 ComfyUI workflow（和渲染同一套节点指针机制），tts 走 config 里的本地命令模板，内建 `compose` 能力用 FFmpeg 合成成片，内建 `review` 能力抽帧送本地 VLM 打分（见下）；`needs_gpu` 的任务和 H3 渲染共享一把 GPU 锁轮流上卡，图片产物可一键存进资产中心。
+- `GET /v1/capabilities`：平台能力目录——H3 视频各模式（提交走 `/v1/renders`，附参数事实表：分段/总长界限、像素红线、是否接参考图/段级参考图，与实际校验逻辑同源）加上 config `capabilities` 里声明的本地能力（文生图、TTS，提交走 `/v1/jobs`），以及内建的 `compose`（合成）、`review`（评分）、`whiteboard`（白板手绘动画）三个能力。
+- `POST/GET /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs/{id}/media`、`POST /v1/jobs/{id}/retry`、`DELETE /v1/jobs/{id}`、`POST /v1/jobs/{id}/save-asset`：通用生成任务队列。t2i 走 ComfyUI workflow（和渲染同一套节点指针机制），tts 走 config 里的本地命令模板，内建 `compose` 能力用 FFmpeg 合成成片，内建 `review` 能力抽帧送本地 VLM 打分（见下），内建 `whiteboard` 能力把线稿资产按标注逐笔绘制成手绘动画（纯 CPU，见 `docs/whiteboard-animation.md`）；`needs_gpu` 的任务和 H3 渲染共享一把 GPU 锁轮流上卡，图片产物可一键存进资产中心。
 - `POST /v1/scripts/document`：上传本地 PDF/Word/文本，本机抽文本后走同一条 Ollama 总结路径生成分镜。
 - `GET /v1/projects/{id}/export`：项目打包下载——成片 MP4、每稿分镜文本与解说词、按渲染时间轴对齐的 SRT、元数据清单。
 - `POST /v1/renders` 新增可选表单字段 `first_frame_asset`/`last_frame_asset`/`segment_ref_assets`：用资产代替上传参考图（后者是段级参考，见「风格钥匙」）；`videotube` 不发这几个字段，冻结契约不受影响，上传文件优先于资产。

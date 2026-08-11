@@ -9,6 +9,9 @@ description = "Local MiniMax H3 rendering service for VideoTube Studio"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
+  # 白板动画引擎(vendor/srt-whiteboard)的渲染依赖;转码走系统 ffmpeg,不需要 av。
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.9,<5",
   "pydantic>=2,<3",
   "pypdf>=4,<7",
   "python-docx>=1,<2",

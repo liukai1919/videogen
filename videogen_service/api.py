@@ -33,6 +33,8 @@ from videogen_service.export import build_project_export
 from videogen_service.jobs import (
     COMPOSE_CAPABILITY_ID,
     REVIEW_CAPABILITY_ID,
+    WHITEBOARD_CAPABILITY_ID,
+    WHITEBOARD_ENGINE_DIR,
     JOB_MEDIA_TYPES,
     JobConflict,
     JobError,
@@ -141,7 +143,9 @@ def create_app(
     jobs = JobService(
         settings,
         runner=job_runner
-        or LocalJobRunner(settings, renders=service, brain_gate=brain_gate),
+        or LocalJobRunner(
+            settings, renders=service, assets=assets, brain_gate=brain_gate
+        ),
         gpu_gate=gpu_gate,
     )
     # 外部 Agent worker 层(Claude Code/Codex):云端推理,不碰渲染执行。
@@ -200,6 +204,21 @@ def create_app(
         if media_type is None:
             raise HTTPException(status_code=404, detail="not found")
         return _static_file(name, media_type)
+
+    @app.get("/whiteboard/preview", response_class=HTMLResponse)
+    def whiteboard_preview() -> FileResponse:
+        # 白板标注校对页直接从 vendored 引擎目录出:升级引擎时页子随
+        # 版本一起换,不留第二份拷贝可漂移。
+        path = WHITEBOARD_ENGINE_DIR / "assets" / "preview.html"
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404, detail="白板引擎不在位(vendor/srt-whiteboard)"
+            )
+        return FileResponse(
+            path,
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -470,6 +489,17 @@ def create_app(
                 "output": "report",
                 "submit_via": "jobs",
                 "needs_gpu": True,
+            }
+        )
+        # 白板手绘动画:线稿资产(asset_id) + 标注 JSON(annotation)逐笔
+        # 绘制成 MP4,纯 CPU;标注校对页在 /whiteboard/preview。
+        catalog.append(
+            {
+                "capability_id": WHITEBOARD_CAPABILITY_ID,
+                "kind": "whiteboard",
+                "output": "video",
+                "submit_via": "jobs",
+                "needs_gpu": False,
             }
         )
         return catalog
