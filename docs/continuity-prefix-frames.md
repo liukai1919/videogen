@@ -82,3 +82,50 @@ OOM/进程级问题);config 注释宣称的"Director 把上一段尾帧+外观�
 
 ComfyUI 崩溃根因的排查(独立任务)不再需要这组对照;固定负载复测
 脚本保留在会话 scratchpad(ab-arm.sh),排查时可直接复用作基线工具。
+
+## 六、落地记(2026-08-10 晚):跨块风格锚默认化
+
+**事故:** `ag_20260810214110_7291b8`(钢铁侠 vs 二郎神,4×5s story)
+连贯性崩坏。根因链:min_seconds=5 + 单块 362 帧预算 → 每块最多 2 段,
+4 段必拆双块;分镜无 续 标记、无 refs → 两块是不同种子的完全独立渲染,
+10.33s 边界处场景/光线/配乐全部硬切,二郎神跨块换装、胸口还串味长出
+反应堆。上游:codex 首轮方案本带 [10s-15s续],换本地大脑执行时把方案
+压缩成一句 idea 传给 write_storyboard,续标记丢失;编剧模板的 continues
+判据(同一动作才标)对剪辑式分镜永远不触发;三层里没有一层知道块边界
+落在哪、边界意味着什么。
+
+**第一版修复(跨块风格锚)已被同日复测证伪,撤销。** 复测设计:同
+提示词 + 同有效种子(job_seed 显式回传)重渲 `ab-chunkanchor-on-1`,
+块 2 每段确实带上了尾帧参考(ComfyUI history 可见 per-seg refs
+[1,1])——但成片与原片**逐像素一致**(三组采样帧 PSNR=inf)。顺藤摸到
+节点源码,真相比预想更大:
+
+- `director/plan.py` / `gen_timeline.py` 的
+  `CONTEXT_REFERENCE_EXCLUDED_KEYS = {i2v, fl2v, t2v, v2v}`:**t2v 段
+  丢弃一切段级 refs**。风格钥匙对 story 分镜从来无效;3.3b 的"节点
+  接受"只是不报错,不等于进采样。M4 的 style key A/B(9v9"无显著
+  差异")实为两条物理相同的视频在对比,该结论作废。
+- editMode=segment 下段**从不继承 global.refs**——而我们的 r2v 定妆
+  恰恰只写在 global 上。ComfyUI 日志实锤:每次 r2v 渲染都在警告
+  "gen segment task=r2v has no reference media — will behave like
+  t2v"。**test_r2v_identity 的"锁脸验证"是假阳性**(纯提示词相似)。
+  两件套里只有帧接力(续标记 i2v 锚)是真的在工作。
+- story 与 r2v 的工作流权重不同(fl2va vs ref2va),story 段改挂 r2v
+  任务此路不通:story 模式下不存在任何可用的参考图通道。
+
+**第二版修复(本次落地,全量测试 233 过):**
+1. **修通 r2v 定妆**:build_timeline 把 refs 下沉到每一段的 refs
+   (段任务 r2v 时节点才消费);定妆图占 <Picture 1..N>,段级风格
+   钥匙接在其后编号。global.refs 保留仅作对账。
+2. **拒收无效挂载**:validate_render 只允许 r2v 分镜带 segment_refs,
+   story 挂了直接报错(此前是静默无效);定妆+段级合计 ≤9。
+3. 能力表 `chunk` 事实块(每块段数上限、边界硬切、无自动跨块锚)+
+   `accepts_segment_refs` 收敛为 r2v 专属;agent 系统提示同步:跨块
+   锁角色/风格唯一通道是 r2v 定妆,≥3 段高连贯先讲清风险;方案获
+   确认后原文一字不落传给 write_storyboard(计划-执行断链的封堵)。
+4. 编剧模板第 7 条加码:每镜 prompt 自含完整场景,禁写依赖上一镜的
+   指代。
+
+**方法论教训:** "节点接受"≠"节点消费"。任何参考图通道的验收标准
+从此固定为:同种子 A/B 出现像素级差异 + ComfyUI 日志无 fallback 警告,
+二者缺一不可。

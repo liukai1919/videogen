@@ -67,6 +67,8 @@ negative_prompt / 每段 refs / prompt_enhance 三个官方能力没接线。
   拒绝再接可能空转的线；待单独实验证实后再接。
 - 3.3b ✓ segment_ref_assets 全链（agent/HTTP/存储/指纹/timeline 每段注入），
   真机探针验证节点接受;这是 M4 风格钥匙的通道。
+  **勘误(2026-08-10 晚)**:"节点接受"≠"节点消费"——t2v 段丢弃一切
+  refs,通道对 story 无效,仅 r2v 分镜可用;见 continuity 文档第六节。
 - 3.4 ✓ wait_render / wait_job 阻塞工具（默认 900s,上限 1800s,超时带标记返回）。
 - 计划外并入：编剧裁剪器就近适配（修"片长偏短八成"）、continues 判据重写、
   默认风格中性化 + write_storyboard style 参数。
@@ -91,6 +93,11 @@ negative_prompt / 每段 refs / prompt_enhance 三个官方能力没接线。
   **A/B 结果(24s 双块,同 seed)：无显著差异**——consistency 9 vs 9,现有
   一致性机制在此工况已到 9 分天花板。通道保留,待 60-120s 多块长片复测;
   不进 DECISIONS。
+  **勘误(2026-08-10 晚)**:该 A/B 的两臂物理相同——节点对 t2v 段丢弃
+  refs,style key 从未进采样,"9v9"是同一条视频和自己比,结论作废。
+  同日核查发现 r2v 全局定妆同为死通道(editMode=segment 不继承
+  global.refs,ComfyUI 日志有 fallback 警告),已修复为 refs 下沉每段;
+  全案见 continuity 文档第六节。
 
 ---
 

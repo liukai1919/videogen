@@ -152,7 +152,9 @@ def mode_capability_schema(settings: ModeConfig, *, config: ServiceConfig) -> di
         "max_pixels": MAX_RENDER_PIXELS,
         "proven_resolution": "864x480",
         "accepts_refs": settings.accepts_refs,
-        "accepts_segment_refs": timeline,
+        # 节点只让 r2v 段消费参考图,t2v 分镜段一律丢弃——段级参考因此
+        # 只在 r2v 分镜下开放。
+        "accepts_segment_refs": timeline and settings.accepts_refs,
         "first_frame": "first_frame" in settings.inputs,
         "last_frame": "last_frame" in settings.inputs,
     }
@@ -163,6 +165,16 @@ def mode_capability_schema(settings: ModeConfig, *, config: ServiceConfig) -> di
         }
         schema["total_seconds_max"] = renderer.max_total_seconds
         schema["shot_header"] = "[起s-止s] 普通镜头;[起s-止s续] 上一镜同一动作的延续"
+        budget = align_length_frames(renderer.max_seconds, fps=renderer.fps)
+        per_shot_min = align_length_frames(renderer.min_seconds, fps=renderer.fps)
+        schema["chunk"] = {
+            "seconds_max": renderer.max_seconds,
+            "max_shots_per_chunk": max(1, budget // per_shot_min),
+            "note": "超过单块包络的分镜拆成独立块串行渲染,块边界处画面与配乐硬切;"
+            "续标记触发上一块尾帧 i2v 接力,此外没有任何自动跨块锚"
+            "(t2v 分镜段不消费参考图)。跨块要锁角色/风格,用 r2v 模式"
+            "配定妆图。",
+        }
     else:
         schema["seconds"] = {
             "min": renderer.min_seconds,
@@ -245,11 +257,17 @@ def validate_render(
         raise RenderError(f"参考图最多 {MAX_REFERENCE_IMAGES} 张,给了 {ref_count} 张")
     timeline_mode = is_timeline_mode(mode_settings)
     if segment_ref_count:
-        if not timeline_mode:
-            raise RenderError("段级参考图(segment_refs)只在分镜模式下生效")
-        if segment_ref_count > MAX_REFERENCE_IMAGES:
+        # 节点核查(2026-08-10):t2v/i2v 段丢弃段级 refs,只有 r2v 段
+        # 消费——story 分镜挂了也是白挂,直接拒收,别让用户以为生效了。
+        if not timeline_mode or not mode_settings.accepts_refs:
             raise RenderError(
-                f"段级参考图最多 {MAX_REFERENCE_IMAGES} 张,给了 {segment_ref_count} 张"
+                "段级参考图(segment_refs)只在 r2v 分镜下生效:"
+                "t2v 分镜段会丢弃参考图,风格钥匙请配合 r2v 模式"
+            )
+        if ref_count + segment_ref_count > MAX_REFERENCE_IMAGES:
+            raise RenderError(
+                f"参考图合计最多 {MAX_REFERENCE_IMAGES} 张(定妆 {ref_count} +"
+                f" 段级 {segment_ref_count}):两者同挂在每段的参考槽上"
             )
     if timeline_mode:
         if has_first_frame or has_last_frame:
@@ -419,17 +437,20 @@ def build_timeline(
 ) -> dict[str, Any]:
     """anchor_b64 是上一块最后一帧的 base64 PNG:整块转成 gen_image 模式,
     首段(接力块只有一段)以它为 i2v 锚点,画面从这一帧无缝接着演。
-    refs_b64 是 r2v 的参考图(身份锚点),挂在 global.refs 上,slot 顺序
-    对应提示词里的 <Picture 1>…<Picture N>;task_type 覆盖全局任务类型
-    (r2v 模式传 "r2v")。segment_refs_b64 挂到每一段自己的 refs 上
-    (segment editMode 下段不继承 global.refs),节点会自动给段提示词
-    加 <Picture N> 前缀——全片风格钥匙就走这条通道。"""
+    refs_b64 是 r2v 的参考图(身份锚点),slot 顺序对应提示词里的
+    <Picture 1>…<Picture N>;task_type 覆盖全局任务类型(r2v 模式传
+    "r2v")。节点核查(2026-08-10):editMode=segment 下段从不继承
+    global.refs,且 t2v/i2v 段会丢弃段级 refs(plan.py
+    CONTEXT_REFERENCE_EXCLUDED_KEYS)——refs 必须直接下沉到每一段,
+    且只有段任务解析为 r2v 时才真正进采样。global.refs 仍然写上,
+    仅供人查看 timeline 时对账。segment_refs_b64(风格钥匙等)接在
+    定妆图之后编号,同样只在 r2v 分镜下生效。"""
     fps = config.renderer.fps
     frames = storyboard_frames(board, fps=fps)
     long_edge = max(width, height)
     segment_refs = [
         {"index": index, "imageB64": image}
-        for index, image in enumerate(segment_refs_b64 or [])
+        for index, image in enumerate([*(refs_b64 or []), *(segment_refs_b64 or [])])
     ]
     segments: list[dict[str, Any]] = []
     start = 0

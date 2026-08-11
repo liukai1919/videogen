@@ -17,6 +17,7 @@ from videogen_service.renderer import (
     build_values,
     concat_command,
     job_seed,
+    mode_capability_schema,
     parse_storyboard,
     split_board,
     storyboard_seconds,
@@ -142,8 +143,26 @@ def test_continuation_on_the_first_shot_is_ignored() -> None:
     assert [plan.anchored for plan in plans] == [False, False]
 
 
-def test_refs_ride_into_the_global_timeline() -> None:
-    board = parse_storyboard("[0s-6s] <Picture 1> 的女子", default_seconds=5)
+def test_capability_schema_exposes_chunk_reality() -> None:
+    # 拆块的事实(每块段数上限、边界硬切、没有自动跨块锚)必须进
+    # 能力表:agent 的规划靠它,不能再把拆块当透明实现细节。
+    config = project_config()
+    schema = mode_capability_schema(config.modes["story"], config=config)
+
+    chunk = schema["chunk"]
+    assert chunk["seconds_max"] == config.renderer.max_seconds
+    assert chunk["max_shots_per_chunk"] == 2
+    assert "硬切" in chunk["note"]
+    assert not schema["accepts_segment_refs"]
+
+
+def test_refs_sink_into_every_segment_for_r2v() -> None:
+    # 节点核查(2026-08-10):editMode=segment 下段从不继承 global.refs,
+    # 只写 global 的定妆等于没给——refs 必须下沉到每一段。
+    board = parse_storyboard(
+        "[0s-6s] <Picture 1> 的女子\n[6s-12s] <Picture 1> 的女子回头",
+        default_seconds=5,
+    )
     timeline = build_timeline(
         board,
         config=project_config(),
@@ -153,9 +172,34 @@ def test_refs_ride_into_the_global_timeline() -> None:
         task_type="r2v",
     )
     assert timeline["global"]["taskType"] == "r2v"
+    for segment in timeline["segments"]:
+        assert segment["refs"] == [
+            {"index": 0, "imageB64": "QUJD"},
+            {"index": 1, "imageB64": "REVG"},
+        ]
+    # global.refs 保留作对账,但真正生效的是段上的。
     assert timeline["global"]["refs"] == [
         {"index": 0, "imageB64": "QUJD"},
         {"index": 1, "imageB64": "REVG"},
+    ]
+
+
+def test_segment_refs_number_after_identity_refs() -> None:
+    # 定妆图占 <Picture 1..N>,风格钥匙等段级参考接在其后,
+    # 提示词里的既有引用不因加风格钥匙而错位。
+    board = parse_storyboard("[0s-6s] <Picture 1> 的女子", default_seconds=5)
+    timeline = build_timeline(
+        board,
+        config=project_config(),
+        width=864,
+        height=480,
+        refs_b64=["QUJD"],
+        segment_refs_b64=["U1RZTEU="],
+        task_type="r2v",
+    )
+    assert timeline["segments"][0]["refs"] == [
+        {"index": 0, "imageB64": "QUJD"},
+        {"index": 1, "imageB64": "U1RZTEU="},
     ]
 
 
@@ -212,13 +256,16 @@ def test_segment_refs_ride_into_every_segment() -> None:
     # 每段拿到独立的字典,改一段不串味。
     timeline["segments"][0]["refs"][0]["imageB64"] = "X"
     assert timeline["segments"][1]["refs"][0]["imageB64"] == "U1RZTEU="
-    # 段级参考不动 global.refs(那是 r2v 身份锚点的位置)。
-    assert timeline["global"]["refs"] == []
 
 
 def test_segment_reference_validation_gates() -> None:
+    # 节点只让 r2v 段消费参考图:story(t2v 段)挂段级参考是无效操作,
+    # 必须在提交时拒绝,不能让用户以为风格钥匙生效了。
     config = project_config()
-    with pytest.raises(RenderError, match="只在分镜模式"):
+    r2v_mode = config.modes["story"].model_copy(update={"accepts_refs": True})
+    with_r2v = config.model_copy(update={"modes": {**config.modes, "r2v": r2v_mode}})
+
+    with pytest.raises(RenderError, match="只在 r2v 分镜"):
         validate_render(
             request(mode="t2v", prompt="a", seconds=6),
             config=config,
@@ -226,19 +273,29 @@ def test_segment_reference_validation_gates() -> None:
             has_last_frame=False,
             segment_ref_count=1,
         )
-    with pytest.raises(RenderError, match="段级参考图最多"):
+    with pytest.raises(RenderError, match="只在 r2v 分镜"):
         validate_render(
             request(mode="story", prompt="[0s-6s] a"),
             config=config,
             has_first_frame=False,
             has_last_frame=False,
-            segment_ref_count=10,
+            segment_ref_count=1,
+        )
+    with pytest.raises(RenderError, match="参考图合计最多"):
+        validate_render(
+            request(mode="r2v", prompt="[0s-6s] <Picture 1> a"),
+            config=with_r2v,
+            has_first_frame=False,
+            has_last_frame=False,
+            ref_count=2,
+            segment_ref_count=8,
         )
     accepted = validate_render(
-        request(mode="story", prompt="[0s-6s] a"),
-        config=config,
+        request(mode="r2v", prompt="[0s-6s] <Picture 1> a"),
+        config=with_r2v,
         has_first_frame=False,
         has_last_frame=False,
+        ref_count=1,
         segment_ref_count=2,
     )
     assert accepted.timeline_mode

@@ -50,6 +50,7 @@ from videogen_service.models import RenderSpec, ScriptOptions
 from videogen_service.renderer import (
     MAX_RENDER_PIXELS,
     RenderError,
+    align_length_frames,
     is_timeline_mode,
     mode_capability_schema,
 )
@@ -369,7 +370,8 @@ class ToolBox:
                 "排一条 H3 视频渲染,立即返回 render_id;用 check_render 查进度。"
                 "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴,总时长可到 "
                 f"{self._config.renderer.max_total_seconds:g} 秒(内部自动拆成 ≤"
-                f"{self._config.renderer.max_seconds:g} 秒的块串行渲染);"
+                f"{self._config.renderer.max_seconds:g} 秒的块串行渲染,"
+                "块边界处画面/配乐硬切,连贯规则见系统提示);"
                 "story 时间轴的每一段都必须在 "
                 f"{self._config.renderer.min_seconds:g}-"
                 f"{self._config.renderer.max_seconds:g} 秒之间,太短的镜头合并进相邻段。"
@@ -394,9 +396,10 @@ class ToolBox:
                     "segment_ref_assets": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "资产 id 列表(≤9),挂到 story 分镜每一段的"
-                        "参考图(如全片风格钥匙,锁色调质感);仅分镜模式,"
-                        "段提示词无需手写引用",
+                        "description": "资产 id 列表(与 ref_assets 合计 ≤9),"
+                        "挂到每一段的补充参考图(如全片风格钥匙,锁色调质感);"
+                        "仅 r2v 分镜生效(story 的 t2v 段会丢弃参考图),"
+                        "编号接在 ref_assets 之后",
                     },
                 },
                 ["mode", "prompt"],
@@ -406,7 +409,12 @@ class ToolBox:
                 "把一段想法或资料文字改写成可渲染的分镜脚本(带 [0s-6s] 时间轴),"
                 "返回的 prompt 可直接交给 generate_video 的 story 模式。",
                 {
-                    "idea": {**text, "description": "想法、主题或资料原文"},
+                    "idea": {
+                        **text,
+                        "description": "想法、主题或资料原文;方案已获用户确认时"
+                        "传方案原文全文(含时间轴、续标记、外观关键词),"
+                        "别压缩转述——编剧只看这里,压缩会弄丢连贯性设计",
+                    },
                     "target_seconds": {"type": "number"},
                     "skill": {**text, "description": "套用的 Skill id,可省略"},
                     "style": {
@@ -1126,7 +1134,15 @@ class AgentService:
             return updated
 
     def _system_prompt(self) -> str:
-        limit = self._config.renderer.max_seconds
+        renderer = self._config.renderer
+        limit = renderer.max_seconds
+        # 拆块事实,与 mode_capability_schema 同一算法:单块帧预算 ÷ 单段
+        # 最短帧数 = 一块最多装几段,超过必拆。
+        chunk_shots = max(
+            1,
+            align_length_frames(limit, fps=renderer.fps)
+            // align_length_frames(renderer.min_seconds, fps=renderer.fps),
+        )
         lines = [
             "你是一个本地视频创作平台的 Agent;所有生成(视频/图片/配音)都在",
             "用户这台电脑上用本机模型完成,你负责规划并调用平台工具。",
@@ -1137,14 +1153,25 @@ class AgentService:
             "任务失败时先用 inspect_failure 拿诊断上下文(报错、参数、",
             "ComfyUI 状态),分析原因并给出具体修复步骤。",
             "先弄清需求再动手;大的创作先给方案,用户点头再排任务。",
+            "方案获用户确认后,把方案原文一字不落传给 write_storyboard 的",
+            "idea(含每段时间轴、续标记、外观关键词)——编剧只看 idea 重写",
+            "分镜,压缩成一句话会把方案里的连贯性设计弄丢。",
             "只在用户明确要求记住偏好时调用 save_memory。",
             "回答用用户的语言,默认中文。",
             "",
             "本机硬性红线(实测,超限会 OOM 击杀渲染后端):分辨率最高 864x480。",
-            f"story 分镜总长可到 {self._config.renderer.max_total_seconds:g} 秒,",
+            f"story 分镜总长可到 {renderer.max_total_seconds:g} 秒,",
             f"渲染器会自动拆成 ≤{limit:g} 秒的块串行渲染再拼接;其他模式单条",
             f" ≤{limit:g} 秒。用户要 1080p/4k 时照常用 864x480 渲染,",
             "compose_video 传 upscale_height=1080 在成片阶段放大。",
+            "",
+            f"拆块不是免费的:一块最多装 {chunk_shots} 段,更长的分镜拆成",
+            "不同种子的独立渲染,块边界处画面和配乐都会硬切;除了 续 标记的",
+            "帧接力,没有任何自动跨块锚(story 的 t2v 段不消费参考图)。",
+            f"分镜超过 {chunk_shots} 段又要求高连贯时,先向用户讲清跨块断裂",
+            "风险再动手,并优先提议 r2v 定妆:资产中心没有定妆图就先渲一小段",
+            "出定妆,save_render_frame_as_asset 存好,再用 r2v + ref_assets 渲",
+            "正片;用户不要这个成本时才直出 story。",
             "",
             "写视频画面提示词(generate_video 的 prompt)时:每段两到四句,写具体:",
             "先主体和动作(谁、在哪、做什么),镜头运动用类型+幅度+速度",
@@ -1161,12 +1188,14 @@ class AgentService:
             "旁白解说不用对白语法:解说走 compose_video 的字幕或配音轨。",
             "某一镜是上一镜同一动作的无缝延续时,时间轴写成 [12s-18s续]:",
             "跨块渲染会用上一镜的最后一帧接力,动作不断线;场景切换别标。",
-            "角色要跨条锁脸时用 r2v 模式:ref_assets 给资产中心的定妆图 id,",
-            "提示词里按序用 <Picture 1> 引用它(如\"<Picture 1> 中的红衣女子",
-            "走进咖啡馆\");首次出现描述一次外观,之后只用标签。",
+            "角色要跨段/跨块锁脸时用 r2v 模式:ref_assets 给资产中心的定妆图",
+            "id,提示词里按序用 <Picture 1> 引用它(如\"<Picture 1> 中的红衣",
+            "女子走进咖啡馆\");首次出现描述一次外观,之后只用标签。定妆图",
+            "会挂到每一段、贯穿每一块,是唯一能跨块锁身份的通道。",
             "全片色调质感要锁死时用\"风格钥匙\":挑一帧好画面用",
-            "save_render_frame_as_asset 存进资产中心,story 渲染时把它的",
-            "asset id 传给 segment_ref_assets,每一段都拿它当风格参考。",
+            "save_render_frame_as_asset 存进资产中心,r2v 渲染时把它的",
+            "asset id 传给 segment_ref_assets(仅 r2v 分镜生效,story 的",
+            "t2v 段会丢弃参考图),编号接在定妆图之后。",
             "成片渲完可用 review_video 打质量分(hook/一致性/画质/意图吻合),",
             "分数给用户做 Release Review 参考,不要自称最终判定。",
         ]

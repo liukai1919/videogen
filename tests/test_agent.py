@@ -355,9 +355,14 @@ def test_r2v_reference_render_carries_asset_images(tmp_path: Path) -> None:
     assert [Path(ref).name for ref in stored["refs"]] == ["ref0.png"]
 
 
-def test_story_render_carries_segment_ref_assets(tmp_path: Path) -> None:
+def test_r2v_render_carries_segment_ref_assets(tmp_path: Path) -> None:
+    # 风格钥匙只在 r2v 分镜下生效(t2v 段会丢弃参考图),编号接在定妆之后。
     config = make_config(tmp_path)
-    asset = AssetStore(config.work_dir).create(
+    store = AssetStore(config.work_dir)
+    identity = store.create(
+        name="定妆", category="角色", filename="face.png", data=b"PNG"
+    )
+    style = store.create(
         name="风格钥匙", category="风格", filename="style.png", data=b"PNG"
     )
     chat = ScriptedChat(
@@ -368,9 +373,11 @@ def test_story_render_carries_segment_ref_assets(tmp_path: Path) -> None:
                     tool_call(
                         "generate_video",
                         {
-                            "mode": "story",
-                            "prompt": "[0s-6s] 山谷\n[6s-12s] 峰顶",
-                            "segment_ref_assets": [asset.asset_id],
+                            "mode": "r2v",
+                            "prompt": "[0s-6s] <Picture 1> 的旅人在山谷\n"
+                            "[6s-12s] <Picture 1> 的旅人登上峰顶",
+                            "ref_assets": [identity.asset_id],
+                            "segment_ref_assets": [style.asset_id],
                         },
                     )
                 ],
@@ -391,7 +398,42 @@ def test_story_render_carries_segment_ref_assets(tmp_path: Path) -> None:
             encoding="utf-8"
         )
     )
+    assert [Path(ref).name for ref in stored["refs"]] == ["ref0.png"]
     assert [Path(ref).name for ref in stored["segment_refs"]] == ["segref0.png"]
+
+
+def test_story_segment_refs_are_rejected_loudly(tmp_path: Path) -> None:
+    # story 挂风格钥匙曾是静默无效(节点丢弃);现在提交即拒,
+    # 错误原文带回给模型,让它改走 r2v。
+    config = make_config(tmp_path)
+    asset = AssetStore(config.work_dir).create(
+        name="风格钥匙", category="风格", filename="style.png", data=b"PNG"
+    )
+    chat = ScriptedChat(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call(
+                        "generate_video",
+                        {
+                            "mode": "story",
+                            "prompt": "[0s-6s] 山谷\n[6s-12s] 峰顶",
+                            "segment_ref_assets": [asset.asset_id],
+                        },
+                    )
+                ],
+            },
+            {"content": "story 不支持风格钥匙,建议改用 r2v。"},
+        ]
+    )
+    with make_client(tmp_path, chat) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        record = client.post(
+            f"/v1/chats/{chat_id}/messages", json={"text": "全片锁一个风格"}
+        ).json()
+        video = json.loads(record["messages"][2]["content"])
+    assert "只在 r2v 分镜" in (video.get("error") or "")
 
 
 def test_a_broken_tool_reports_instead_of_crashing(tmp_path: Path) -> None:
@@ -444,6 +486,29 @@ def test_memory_preferences_ride_in_the_system_prompt(tmp_path: Path) -> None:
         chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
         client.post(f"/v1/chats/{chat_id}/messages", json={"text": "在吗"})
     assert "旁白都用口语" in chat.requests[0][0]["content"]
+
+
+def test_chunk_reality_rides_in_the_system_prompt(tmp_path: Path) -> None:
+    """拆块的代价(边界硬切)、r2v 定妆指引和方案原文交接规则必须进系统
+    提示:ag_20260810214110_7291b8 的跨块断裂正是这三课都缺席的结果。"""
+    config = make_config(tmp_path)
+    chat = ScriptedChat([{"content": "好的。"}])
+    app = create_app(
+        config,
+        renderer=FakeRenderer(),
+        studio=StubStudio(),
+        job_runner=FakeRunner(),
+        chat_client=chat,
+    )
+    with TestClient(app) as client:
+        chat_id = client.post("/v1/chats", json={}).json()["chat_id"]
+        client.post(f"/v1/chats/{chat_id}/messages", json={"text": "在吗"})
+    system = chat.requests[0][0]["content"]
+    assert "一块最多装 2 段" in system
+    assert "硬切" in system
+    assert "没有任何自动跨块锚" in system
+    assert "r2v 定妆" in system
+    assert "方案原文一字不落" in system
 
 
 def write_routed_skill(tmp_path: Path) -> None:

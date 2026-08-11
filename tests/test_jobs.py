@@ -154,7 +154,8 @@ def test_the_capability_catalog_covers_both_lanes(tmp_path: Path) -> None:
     assert story["timeline"] is True
     assert story["per_shot_seconds"] == {"min": 5.0, "max": 15.0}
     assert story["total_seconds_max"] == 120.0
-    assert story["accepts_segment_refs"] is True
+    # 节点只让 r2v 段消费参考图,story(t2v 段)的段级参考已关闭。
+    assert story["accepts_segment_refs"] is False
     assert story["max_pixels"] == 864 * 480
     assert by_id["flux-t2i"]["output"] == "image"
     assert by_id["flux-t2i"]["submit_via"] == "jobs"
