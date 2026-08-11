@@ -111,3 +111,46 @@ M1（防护网）→ M2（技能分层）→ M3（活数据+红线）→ M4（st
 
 M1 半天就能做完且零风险，任何时候都值得先做。M2/M3 内部任务可并行拆 PR。
 M4 两项相互独立，4.1 依赖 3.3b。
+
+---
+
+## Comfy 官方 Day-0 博客对标(2026-08-11,任务源:blog.comfy.org/p/minimax-h3-day-0-support-in-comfyui)
+
+官方本地模板(workflow_templates/video_minimax_h3_{t2v,i2v,r2v}.json)与本仓对照结论:
+
+1. **采样参数与官方完全一致**:res_multistep + simple 调度 + 20 步 + denoise 1,
+   同一套权重文件名(fl2va/ref2va pruned_int8_convrot + qwen3vl nvfp4 + 双 VAE)。
+   我们的 t2v 工作流本就是官方核心节点栈(MiniMaxH3ImageToVideo +
+   SamplerCustomAdvanced);无需调参。
+2. **官方本地默认分辨率 = 0.4MP = 864x480**,与我们的 OOM 红线相同——2K 是模型
+   上限不是本地推荐。官方模板 MarkdownNote 附完整分辨率阶梯(0.2MP=608x352 …
+   0.98MP=1344x768 … 2.0MP=1920x1088),已抄录为活数据来源;越阶试渲走
+   offload 探针,过了再动 MAX_RENDER_PIXELS。
+3. **官方 r2v 走核心节点 MiniMaxH3ReferenceToVideo**(LoadImage 直连,模板给 2 个
+   参考位),与我们的 Director timeline 路线不同源。我们的 Director refs 已修通
+   (66ec33e)且支持分镜+9 图,维持现路线;核心节点留作单段 r2v 的备选路
+   (若 Director 再出兼容问题)。ComfyUI 核心支持见 ComfyUI#15224。
+4. **官方 t2v 示例提示词是"单发散文时间轴"**:一条 prompt 内写 [0s-1s][1s-2.5s]…
+   硬切多镜头(亚 5 秒镜头合法,画面内文字大方使用,负面约束以散文句式附尾),
+   一次采样保证镜头间连贯——不依赖任何 Director 分段。这是"≤15s 单发 vs story
+   分段"A/B(见下一条落地记)的直接依据。
+
+**散文时间轴 A/B 落地记(2026-08-11):**
+同一份 3×5s 三镜头脚本、同种子:(a) t2v 单发散文时间轴 vs (b) story
+Director 分段(实拆 2 块)。VLM 评分 9v9 再次触天花板(6 帧抽样只盯
+人物,抓不到场景漂移),**帧证据分胜负**:(a) 三镜头同一条街、同一
+人物、同一帆布包,光线从晨雾连续演进到日出;(b) 三段各长一条街,
+道具丢失,跨块段连建筑风格都换了(红灯笼街)。已落地片长路由:
+`_script_mode` 按原始总秒数选模式——≤max_seconds 走 t2v 单发
+(seconds 用原始值,SRT 不补帧网格),超了才 story 拆块;agent 系统
+提示与工具描述同步。教训并入 DECISIONS 候选:VLM 评分对"场景级"
+一致性不敏感,一致性 A/B 必须附帧证据。
+
+**VRAM offload 探针落地记(2026-08-11):**
+ComfyUI 已带动态 offload(--reserve-vram 2.0 等),逐档探针:0.5MP
+(960x544)242s ✓、0.7MP(1152x640)184s ✓、0.98MP(1344x768 原生档)
+283s ✓,全程零 OOM;满包络反例 1344x768×15s 在 1800s 超时线被掐、
+宿主内存见底。结论:内存压力 ≈ 像素×帧数,红线从单一分辨率改为乘积
+预算(renderer.max_pixels_for_seconds,agent 守卫/能力表同源),短条
+解锁原生 768 档(定妆照直接受益),15s 级与 story 维持 864x480。
+D1 已修订。

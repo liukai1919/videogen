@@ -48,10 +48,10 @@ from videogen_service.jobs import (
 from videogen_service.memory import MemoryStore
 from videogen_service.models import RenderSpec, ScriptOptions
 from videogen_service.renderer import (
-    MAX_RENDER_PIXELS,
     RenderError,
     align_length_frames,
     is_timeline_mode,
+    max_pixels_for_seconds,
     mode_capability_schema,
 )
 from videogen_service.scripting import ScriptError, ScriptStudio
@@ -68,9 +68,7 @@ CHATS_DIRNAME = ".chats"
 # A model that keeps calling tools without answering is looping, not working.
 _MAX_TOOL_ROUNDS = 8
 _MAX_TURN_MESSAGES = 60  # context sent to the brain per turn, newest kept
-# 像素红线的唯一事实源在 renderer.MAX_RENDER_PIXELS(能力表同源),
-# 这里只是给守卫留个本地名字。
-_MAX_RENDER_PIXELS = MAX_RENDER_PIXELS
+# 像素红线的唯一事实源在 renderer.max_pixels_for_seconds(能力表同源)。
 
 
 class AgentError(RuntimeError):
@@ -368,7 +366,9 @@ class ToolBox:
             tool(
                 "generate_video",
                 "排一条 H3 视频渲染,立即返回 render_id;用 check_render 查进度。"
-                "分镜长片用 story 模式,prompt 里写 [0s-6s] 时间轴,总时长可到 "
+                f"≤{self._config.renderer.max_seconds:g} 秒的多镜头短片用 t2v:"
+                "prompt 里直接写 [0s-5s] 散文时间轴,一次采样,镜头间连贯最好。"
+                "更长的分镜才用 story 模式,总时长可到 "
                 f"{self._config.renderer.max_total_seconds:g} 秒(内部自动拆成 ≤"
                 f"{self._config.renderer.max_seconds:g} 秒的块串行渲染,"
                 "块边界处画面/配乐硬切,连贯规则见系统提示);"
@@ -662,13 +662,8 @@ class ToolBox:
         The manual workbench path stays unrestricted — a person typing into
         the form is deliberate; a model relaying "4k画质" is not. story 的
         时长不在这里管:渲染器会把长分镜拆成安全大小的块串行渲染,总长
-        上限由 validate_storyboard 在提交时把关。"""
-        if spec.width * spec.height > _MAX_RENDER_PIXELS:
-            raise ValueError(
-                f"分辨率 {spec.width}x{spec.height} 超过本机内存红线"
-                "(最高 864x480 的像素量,1080p 实测必 OOM);"
-                "请用 864x480 渲染,compose_video 传 upscale_height 放大成片。"
-            )
+        上限由 validate_storyboard 在提交时把关。像素红线随时长滑动:
+        内存压力 ≈ 像素×帧数(2026-08-11 探针,DECISIONS D1)。"""
         limit = self._config.renderer.max_seconds
         mode_settings = self._config.modes.get(spec.mode)
         timeline = mode_settings is not None and is_timeline_mode(mode_settings)
@@ -676,6 +671,16 @@ class ToolBox:
             raise ValueError(
                 f"{spec.seconds:g} 秒超过本机单条渲染红线 ≤{limit:g} 秒;"
                 "请缩短,或改用 story 分镜(会自动拆块串行渲染)。"
+            )
+        # story 的块最长到 max_seconds,按最坏块算预算。
+        seconds = limit if timeline else spec.seconds
+        allowed = max_pixels_for_seconds(seconds, config=self._config)
+        if spec.width * spec.height > allowed:
+            raise ValueError(
+                f"分辨率 {spec.width}x{spec.height} 超过 {seconds:g} 秒时长下的"
+                f"本机内存包络(此时长最多约 {allowed} 像素)。参考:15 秒级和"
+                " story 分镜用 864x480,≤5 秒短条可到 1344x768;高清交付用"
+                " compose_video 传 upscale_height 放大成片。"
             )
 
     def _review_video(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -738,9 +743,12 @@ class ToolBox:
             "prompt": result.prompt,
             "narrations": [shot.narration for shot in result.shots],
             # Ready for compose_video's subtitles_srt: cue times follow the
-            # padded timeline the renderer actually produces.
+            # timeline the renderer actually produces — story 补齐帧网格,
+            # t2v 单发用原始秒数。
             "narration_srt": narration_srt(
-                result.shots, fps=self._config.renderer.fps
+                result.shots,
+                fps=self._config.renderer.fps,
+                padded=result.mode == "story",
             ),
         }
 
@@ -1159,12 +1167,18 @@ class AgentService:
             "只在用户明确要求记住偏好时调用 save_memory。",
             "回答用用户的语言,默认中文。",
             "",
-            "本机硬性红线(实测,超限会 OOM 击杀渲染后端):分辨率最高 864x480。",
+            "本机硬性红线(实测,超限会 OOM/拖垮渲染后端):分辨率上限随时长",
+            "滑动——≤5 秒短条可到 1344x768(原生 768 档,渲定妆照请用它,",
+            "参考图更清晰),15 秒级和 story 分镜是 864x480。",
             f"story 分镜总长可到 {renderer.max_total_seconds:g} 秒,",
             f"渲染器会自动拆成 ≤{limit:g} 秒的块串行渲染再拼接;其他模式单条",
             f" ≤{limit:g} 秒。用户要 1080p/4k 时照常用 864x480 渲染,",
             "compose_video 传 upscale_height=1080 在成片阶段放大。",
             "",
+            f"多镜头片长路由(A/B 实证):≤{limit:g} 秒直接用 t2v,把",
+            "[0s-5s] 时间轴写进提示词——一次采样,场景/人物/道具跨镜头原生",
+            f"连贯,亚 5 秒短镜头也合法;write_storyboard 已按此自动选 mode,",
+            "照它返回的 mode 提交即可。story 只留给更长的片子。",
             f"拆块不是免费的:一块最多装 {chunk_shots} 段,更长的分镜拆成",
             "不同种子的独立渲染,块边界处画面和配乐都会硬切;除了 续 标记的",
             "帧接力,没有任何自动跨块锚(story 的 t2v 段不消费参考图)。",

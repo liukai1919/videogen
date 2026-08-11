@@ -113,7 +113,9 @@ def test_generated_script_is_a_storyboard_the_renderer_accepts() -> None:
         ScriptRequest(url="https://youtu.be/dQw4w9WgXcQ")
     )
 
-    assert result.mode == "story"
+    # 12 秒在单条包络内 → 走 t2v 单发(散文时间轴,一次采样保镜头连贯,
+    # A/B 2026-08-11),秒数按原始值请求而不是补齐帧网格。
+    assert result.mode == "t2v"
     assert result.source.video_id == "dQw4w9WgXcQ"
     assert result.title == "蓝天为什么是蓝的"
     assert [shot.prompt for shot in result.shots] == [
@@ -125,7 +127,22 @@ def test_generated_script_is_a_storyboard_the_renderer_accepts() -> None:
     board = parse_storyboard(result.prompt, default_seconds=6)
     validate_storyboard(board, config=config)
     assert len(board.shots) == 2
-    assert result.seconds == pytest.approx(2 * 158 / 24)
+    assert result.seconds == pytest.approx(12.0)
+
+
+def test_long_scripts_still_route_to_story_chunking() -> None:
+    # 4×6s=24s 超单条包络 → story 模式,秒数用补齐后的分镜总长。
+    result = studio(
+        draft(
+            (6, "航拍晴朗天空"),
+            (6, "阳光穿过大气层的示意"),
+            (6, "蓝光被散射的粒子特写"),
+            (6, "黄昏天空转红的对比"),
+        )
+    ).create(ScriptRequest(url="https://youtu.be/dQw4w9WgXcQ"))
+
+    assert result.mode == "story"
+    assert result.seconds == pytest.approx(4 * 158 / 24)
 
 
 def test_the_transcript_reaches_the_summariser_with_the_video_title() -> None:

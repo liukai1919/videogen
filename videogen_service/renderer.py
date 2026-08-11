@@ -131,9 +131,21 @@ def job_seed(render_id: str) -> int:
     return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
-# 本机实测 OOM 红线的像素量:864x480(1080p 在模型加载阶段就顶穿内存,
-# 见 docs/comfyui-oom-rootcause.md)。agent 守卫与能力表共用这一个数。
-MAX_RENDER_PIXELS = 864 * 480
+# 本机实测的渲染内存包络(2026-08-11 offload 探针,evals/DECISIONS.md D1):
+# 内存压力 ≈ 像素 × 帧数,红线因此是乘积预算而不是单一分辨率。两个实证
+# 锚点:864x480 × 15s 级长期稳定;1344x768 × 5s 探针 283 秒过。反例:
+# 1344x768 × 15s 超时(1800s)+宿主内存见底,禁。agent 守卫与能力表共用。
+MAX_RENDER_PIXELS = 864 * 480  # 15s 级长条与 story 块的包络
+MAX_RENDER_PIXELS_SHORT = 1344 * 768  # 短条上限 = 官方原生 768 档,未测更高
+MAX_PIXEL_SECONDS = MAX_RENDER_PIXELS * 15.5  # 乘积预算,两锚点之下
+
+
+def max_pixels_for_seconds(seconds: float, *, config: ServiceConfig) -> int:
+    """给定时长下允许的最大像素量:乘积预算 ÷ 补齐后的时长,封顶在短条
+    上限。story 分镜的块按 max_seconds 算(调用方传入)。"""
+    fps = config.renderer.fps
+    aligned = align_length_frames(seconds, fps=fps) / fps
+    return min(MAX_RENDER_PIXELS_SHORT, int(MAX_PIXEL_SECONDS / aligned))
 
 
 def is_timeline_mode(settings: ModeConfig) -> bool:
@@ -150,7 +162,9 @@ def mode_capability_schema(settings: ModeConfig, *, config: ServiceConfig) -> di
         "timeline": timeline,
         "fps": renderer.fps,
         "max_pixels": MAX_RENDER_PIXELS,
-        "proven_resolution": "864x480",
+        "max_pixels_short": MAX_RENDER_PIXELS_SHORT,
+        "pixel_seconds_budget": int(MAX_PIXEL_SECONDS),
+        "proven_resolution": "864x480@15s;1344x768@5s",
         "accepts_refs": settings.accepts_refs,
         # 节点只让 r2v 段消费参考图,t2v 分镜段一律丢弃——段级参考因此
         # 只在 r2v 分镜下开放。

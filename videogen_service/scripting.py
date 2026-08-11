@@ -204,6 +204,8 @@ class ScriptStudio:
             transcript.language,
             ",自动字幕" if transcript.automatic else "",
         )
+        raw_seconds = sum(shot.seconds for shot in shots)
+        mode = _script_mode(self._config, raw_seconds=raw_seconds)
         return ScriptResult(
             source=ScriptSource(
                 video_id=transcript.video_id,
@@ -217,9 +219,15 @@ class ScriptStudio:
             ),
             title=draft.title or transcript.title,
             summary=draft.summary,
-            mode=_script_mode(self._config),
+            mode=mode,
             prompt=prompt,
-            seconds=storyboard_seconds(board, fps=self._config.renderer.fps),
+            # t2v 单发按原始秒数请求(时间轴只是提示词里的指挥);
+            # story 才用补齐到帧网格的时长。
+            seconds=(
+                raw_seconds
+                if mode == "t2v"
+                else storyboard_seconds(board, fps=self._config.renderer.fps)
+            ),
             shots=shots,
         )
 
@@ -259,15 +267,21 @@ class ScriptStudio:
         board = parse_storyboard(prompt, default_seconds=settings.shot_seconds)
         validate_storyboard(board, config=self._config)
         _LOGGER.info("已从文档 %s 生成 %d 段分镜", filename, len(shots))
+        raw_seconds = sum(shot.seconds for shot in shots)
+        mode = _script_mode(self._config, raw_seconds=raw_seconds)
         return ScriptResult(
             source=DocumentSource(
                 filename=filename, chars=len(clipped), truncated=truncated
             ),
             title=draft.title or title,
             summary=draft.summary,
-            mode=_script_mode(self._config),
+            mode=mode,
             prompt=prompt,
-            seconds=storyboard_seconds(board, fps=self._config.renderer.fps),
+            seconds=(
+                raw_seconds
+                if mode == "t2v"
+                else storyboard_seconds(board, fps=self._config.renderer.fps)
+            ),
             shots=shots,
         )
 
@@ -282,7 +296,13 @@ class ScriptStudio:
         return _apply_skill(options, skill), skill
 
 
-def _script_mode(config: ServiceConfig) -> RenderMode:
+def _script_mode(config: ServiceConfig, *, raw_seconds: float) -> RenderMode:
+    """片长路由(A/B 2026-08-11,官方散文时间轴 vs Director 分段):
+    单条渲染包络内走 t2v 单发——[Xs-Ys] 时间轴写在提示词里,一次采样,
+    镜头间的场景/人物/道具连贯由模型原生保证(帧证据:单发同街同人同包,
+    分段臂每段各长一条街)。超包络才用 story 拆块。"""
+    if raw_seconds <= config.renderer.max_seconds and "t2v" in config.modes:
+        return "t2v"
     if "story" in config.modes:
         return "story"
     raise ScriptError("生成分镜需要 story 模式,请在 config.yaml 里配置它")

@@ -143,6 +143,25 @@ def test_continuation_on_the_first_shot_is_ignored() -> None:
     assert [plan.anchored for plan in plans] == [False, False]
 
 
+def test_pixel_budget_slides_with_duration() -> None:
+    # 内存压力 ≈ 像素×帧数(2026-08-11 offload 探针):5 秒短条放行原生
+    # 768 档,15 秒级只放行 864x480;上限永远封在 1344x768(未测更高)。
+    from videogen_service.renderer import (
+        MAX_RENDER_PIXELS_SHORT,
+        max_pixels_for_seconds,
+    )
+
+    config = project_config()
+    assert max_pixels_for_seconds(5, config=config) == MAX_RENDER_PIXELS_SHORT
+    assert 1344 * 768 <= max_pixels_for_seconds(5, config=config)
+    fifteen = max_pixels_for_seconds(15, config=config)
+    assert 864 * 480 <= fifteen < 960 * 544
+    # 预算单调不增:时长越长,允许像素越少。
+    assert max_pixels_for_seconds(10, config=config) <= max_pixels_for_seconds(
+        5, config=config
+    )
+
+
 def test_capability_schema_exposes_chunk_reality() -> None:
     # 拆块的事实(每块段数上限、边界硬切、没有自动跨块锚)必须进
     # 能力表:agent 的规划靠它,不能再把拆块当透明实现细节。

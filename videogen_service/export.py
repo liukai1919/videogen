@@ -71,14 +71,20 @@ def build_project_export(
     return f"{project.name}.zip", buffer.getvalue()
 
 
-def narration_srt(shots: list[ScriptShot], *, fps: int) -> str:
-    """Subtitles on the timeline the renderer actually produces: each shot is
-    padded to the H3 frame grid, so cue times use the padded durations."""
+def narration_srt(shots: list[ScriptShot], *, fps: int, padded: bool = True) -> str:
+    """Subtitles on the timeline the renderer actually produces. story 模式
+    每段补齐到 H3 帧网格,cue 用补齐后的时长;t2v 单发的时间轴只是提示词
+    指挥,cue 直接用原始秒数(padded=False)。"""
     entries: list[str] = []
     start = 0.0
     index = 1
     for shot in shots:
-        end = start + align_length_frames(shot.seconds, fps=fps) / fps
+        length = (
+            align_length_frames(shot.seconds, fps=fps) / fps
+            if padded
+            else shot.seconds
+        )
+        end = start + length
         narration = shot.narration.strip()
         if narration:
             entries.append(

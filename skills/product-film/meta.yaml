@@ -1,0 +1,15 @@
+name: 产品广告片
+description: 演播室质感的产品短片:纯色虚空背景、双色光、材质微距、三镜结构、音画逐拍同步。
+category: 广告
+version: "1.0"
+use_when:
+  - 产品宣传片、电商展示、新品发布短片
+  - 开箱质感、材质特写、产品英雄镜头
+  - 数码、饮料、美妆等实物商品的广告需求
+not_for:
+  - 有人物叙事和世界观的短片(用 concept-trailer)
+  - 讲原理、讲知识的内容(用 science-doc)
+defaults:
+  style: 演播室产品片质感,纯黑虚空背景,双色对比布光,材质细节锐利,镜头运动精准克制,画面里不要出现文字、字幕或水印
+  shot_seconds: 5
+  target_seconds: 15
