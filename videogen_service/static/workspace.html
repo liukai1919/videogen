@@ -48,6 +48,21 @@
       </aside>
 
       <main class="ws-main" aria-label="产物">
+        <section class="ws-download-panel" aria-label="下载外部视频">
+          <h2>下载外部视频</h2>
+          <p class="subtle">粘贴公开视频链接，每行一个。先解析信息，再选择清晰度下载。</p>
+          <textarea id="ws-download-urls" class="field-input" rows="2" placeholder="https://www.youtube.com/watch?v=…"></textarea>
+          <div class="ws-download-controls">
+            <select id="ws-download-kind" class="field-input" aria-label="下载格式">
+              <option value="video">MP4 视频</option>
+              <option value="audio">MP3 音频</option>
+            </select>
+            <button type="button" id="ws-download-info" class="button button-secondary">解析链接</button>
+            <button type="button" id="ws-download-all" class="button button-primary" disabled>全部下载</button>
+          </div>
+          <div id="ws-download-preview" class="ws-download-list"></div>
+          <div id="ws-download-tasks" class="ws-download-list"></div>
+        </section>
         <header class="ws-main-head">
           <h1>产物</h1>
           <span class="subtle" id="ws-outputs-hint"></span>

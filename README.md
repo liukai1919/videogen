@@ -136,6 +136,12 @@ Copy-Item config.example.yaml config.yaml
 - `POST /v1/renders`：以 `render_id` 幂等提交渲染。
 - `GET /v1/renders/{render_id}`：读取队列、进度或失败原因。
 - `GET /v1/renders/{render_id}/media`：下载完成的 MP4。
+
+### 外部视频下载
+
+工作台的「下载外部视频」支持一次粘贴最多 10 个公开视频链接，先解析标题和可用清晰度，再下载 MP4 或提取 MP3。下载记录保存在 `work/.downloads/`，最多同时运行 2 个任务；可查看进度、取消和重试。服务重启后保留已完成记录，未完成任务标记为可重试的失败。MP4 合并或转码、MP3 提取需要 FFmpeg。
+
+API：`POST /v1/downloads/info` 解析链接；`POST /v1/downloads` 提交链接数组；`GET /v1/downloads` 查看任务；`GET /v1/downloads/{id}`、`POST /v1/downloads/{id}/cancel`、`POST /v1/downloads/{id}/retry`、`GET /v1/downloads/{id}/media` 分别用于查询、取消、重试和保存文件。输入只接受可解析到公网地址的 HTTP/HTTPS 链接。现有 `script.cookies_file` 和 `script.proxy` 配置也会用于视频下载。
 - `POST /v1/renders/{render_id}/retry`：用磁盘上的原请求重排一条失败的渲染。
 - `POST /v1/renders/{render_id}/cancel`：取消排队中或渲染中的渲染（终态沿用 `FAILED` + 可读文案，不给冻结契约引入新状态值）。
 - `DELETE /v1/renders/{render_id}`：删除终态渲染及其参考帧。

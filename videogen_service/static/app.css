@@ -534,6 +534,23 @@ select:focus {
   min-width: 0;
 }
 
+.ws-download-panel {
+  padding: 18px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.ws-download-panel h2 { margin: 0 0 6px; font-size: 1.1rem; }
+.ws-download-panel textarea { display: block; width: 100%; margin: 12px 0; resize: vertical; }
+.ws-download-controls, .ws-download-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ws-download-controls { margin-bottom: 12px; }
+.ws-download-controls select { width: auto; }
+.ws-download-list { display: grid; gap: 8px; margin-top: 8px; }
+.ws-download-row { padding: 8px 0; border-top: 1px solid var(--border); }
+.ws-download-row > span:first-child { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+.ws-download-row select { width: auto; }
+
 .draft-row {
   display: flex;
   align-items: baseline;

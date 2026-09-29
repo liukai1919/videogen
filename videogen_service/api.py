@@ -7,6 +7,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import ValidationError
+from pydantic import BaseModel, Field
 from urllib.parse import quote, urlparse
 
 from videogen_service.agent import (
@@ -29,6 +30,7 @@ from videogen_service.assets import (
 )
 from videogen_service.config import ServiceConfig, load_config
 from videogen_service.documents import DocumentError, extract_text
+from videogen_service.downloads import DownloadError, DownloadService, YtDlpEngine
 from videogen_service.export import build_project_export
 from videogen_service.jobs import (
     COMPOSE_CAPABILITY_ID,
@@ -100,6 +102,16 @@ _STATIC_TYPES = {
 }
 
 
+class DownloadInfoRequest(BaseModel):
+    url: str
+
+
+class DownloadBatchRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=10)
+    kind: str = "video"
+    format_id: str | None = None
+
+
 def _static_file(name: str, media_type: str) -> FileResponse:
     # Serving by name from a fixed table keeps the console's few assets out of
     # reach of path traversal without pulling in a whole static-files mount.
@@ -135,6 +147,12 @@ def create_app(
     )
     projects = ProjectStore(settings.work_dir)
     assets = AssetStore(settings.work_dir)
+    downloads = DownloadService(
+        settings.work_dir,
+        engine=YtDlpEngine(
+            cookies_file=settings.script.cookies_file, proxy=settings.script.proxy
+        ),
+    )
     pipeline = PipelineService(
         settings, renders=service, projects=projects, studio=workshop
     )
@@ -170,11 +188,13 @@ def create_app(
         finally:
             # The pipeline submits renders, so it stops taking work first.
             pipeline.close()
+            downloads.close()
             jobs.close()
             service.close()
 
     app = FastAPI(title="VideoTube Videogen", version="0.1.0", lifespan=lifespan)
     app.state.render_service = service
+    app.state.download_service = downloads
     app.state.agent_workers = agent_workers
 
     @app.middleware("http")
@@ -204,6 +224,57 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, object]:
         return service.health()
+
+    @app.post("/v1/downloads/info")
+    def download_info(request: DownloadInfoRequest) -> dict[str, object]:
+        try:
+            return downloads.info(request.url)
+        except DownloadError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=502, detail=f"解析视频失败：{error}") from error
+
+    @app.post("/v1/downloads", status_code=status.HTTP_201_CREATED)
+    def create_downloads(request: DownloadBatchRequest) -> list[dict[str, object]]:
+        try:
+            return downloads.submit_many(
+                request.urls, kind=request.kind, format_id=request.format_id
+            )
+        except DownloadError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/downloads")
+    def list_downloads() -> list[dict[str, object]]:
+        return downloads.list()
+
+    @app.get("/v1/downloads/{task_id}")
+    def get_download(task_id: str) -> dict[str, object]:
+        try:
+            return downloads.get(task_id)
+        except DownloadError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/v1/downloads/{task_id}/cancel")
+    def cancel_download(task_id: str) -> dict[str, object]:
+        try:
+            return downloads.cancel(task_id)
+        except DownloadError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/v1/downloads/{task_id}/retry", status_code=status.HTTP_201_CREATED)
+    def retry_download(task_id: str) -> dict[str, object]:
+        try:
+            return downloads.retry(task_id)
+        except DownloadError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.api_route("/v1/downloads/{task_id}/media", methods=["GET", "HEAD"])
+    def download_media(task_id: str) -> FileResponse:
+        try:
+            path = downloads.media_path(task_id)
+        except DownloadError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return FileResponse(path, filename=path.name, media_type="audio/mpeg" if path.suffix.lower() == ".mp3" else "video/mp4")
 
     @app.post("/v1/validate", response_model=RenderValidation)
     def validate(request: RenderValidationRequest) -> RenderValidation:

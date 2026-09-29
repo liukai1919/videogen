@@ -14,6 +14,13 @@ const agentSelect = document.getElementById("ws-agent");
 const messagesBox = document.getElementById("ws-messages");
 const inputBox = document.getElementById("ws-input");
 const sendButton = document.getElementById("ws-send");
+const downloadInput = document.getElementById("ws-download-urls");
+const downloadKind = document.getElementById("ws-download-kind");
+const downloadPreview = document.getElementById("ws-download-preview");
+const downloadTasks = document.getElementById("ws-download-tasks");
+const downloadAll = document.getElementById("ws-download-all");
+let downloadChoices = [];
+let downloadTimer = null;
 
 const AGENT_LABELS = { claude: "Claude Code", codex: "Codex" };
 
@@ -598,6 +605,145 @@ async function sendMessage() {
 
 // ---- 装配 ---------------------------------------------------------------------
 
+function parseDownloadUrls(value) {
+  return [...new Set(value.split(/[\s,]+/).map((url) => url.trim()).filter(Boolean))];
+}
+
+async function inspectDownloads() {
+  const urls = parseDownloadUrls(downloadInput.value);
+  if (!urls.length || urls.length > 10) {
+    toast("一次请输入 1 至 10 个链接", "error");
+    return;
+  }
+  const button = document.getElementById("ws-download-info");
+  button.disabled = true;
+  downloadAll.disabled = true;
+  downloadChoices = [];
+  downloadPreview.replaceChildren();
+  for (const url of urls) {
+    try {
+      const info = await request("/v1/downloads/info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      downloadChoices.push({ url, info });
+    } catch (error) {
+      const row = document.createElement("div");
+      row.className = "ws-download-row subtle";
+      row.textContent = `${url}：${error.message}`;
+      downloadPreview.append(row);
+    }
+  }
+  for (const choice of downloadChoices) {
+    const row = document.createElement("div");
+    row.className = "ws-download-row";
+    const title = document.createElement("span");
+    title.textContent = choice.info.title || choice.url;
+    title.title = choice.url;
+    const format = document.createElement("select");
+    format.className = "field-input";
+    const best = document.createElement("option");
+    best.value = "";
+    best.textContent = "最佳画质";
+    format.append(best);
+    for (const item of choice.info.formats || []) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${item.height}p`;
+      format.append(option);
+    }
+    choice.format = format;
+    format.hidden = downloadKind.value === "audio";
+    const start = document.createElement("button");
+    start.type = "button";
+    start.className = "button button-secondary";
+    start.textContent = "下载";
+    start.addEventListener("click", async () => {
+      start.disabled = true;
+      try { await startDownload(choice); }
+      finally { start.disabled = false; }
+    });
+    row.append(title, format, start);
+    downloadPreview.append(row);
+  }
+  downloadAll.disabled = downloadChoices.length === 0;
+  button.disabled = false;
+}
+
+async function startDownload(choice) {
+  try {
+    await request("/v1/downloads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        urls: [choice.url],
+        kind: downloadKind.value,
+        format_id: downloadKind.value === "audio" ? null : choice.format.value || null,
+      }),
+    });
+    await loadDownloads();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function loadDownloads() {
+  let tasks;
+  try { tasks = await request("/v1/downloads"); }
+  catch (error) { return; }
+  downloadTasks.replaceChildren();
+  for (const task of tasks) {
+    const row = document.createElement("div");
+    row.className = "ws-download-row";
+    const label = document.createElement("span");
+    label.textContent = `${task.kind === "audio" ? "MP3" : "MP4"} · ${task.url}`;
+    label.title = task.url;
+    const state = document.createElement("span");
+    state.className = "subtle";
+    state.textContent = task.error || `${task.status} ${task.progress}%`;
+    row.append(label, state);
+    if (task.status === "DONE") {
+      const link = document.createElement("a");
+      link.className = "button button-secondary";
+      link.href = task.media_url;
+      link.download = task.filename;
+      link.textContent = "保存";
+      row.append(link);
+    } else {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "button button-secondary";
+      const active = ["QUEUED", "RUNNING"].includes(task.status);
+      action.textContent = active ? "取消" : "重试";
+      action.addEventListener("click", async () => {
+        try {
+          await request(`/v1/downloads/${task.task_id}/${active ? "cancel" : "retry"}`, { method: "POST" });
+          await loadDownloads();
+        } catch (error) { toast(error.message, "error"); }
+      });
+      row.append(action);
+    }
+    downloadTasks.append(row);
+  }
+  const active = tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status));
+  if (active && downloadTimer === null) downloadTimer = setInterval(loadDownloads, 3000);
+  if (!active && downloadTimer !== null) {
+    clearInterval(downloadTimer);
+    downloadTimer = null;
+  }
+}
+
+document.getElementById("ws-download-info").addEventListener("click", inspectDownloads);
+downloadKind.addEventListener("change", () => {
+  for (const choice of downloadChoices) choice.format.hidden = downloadKind.value === "audio";
+});
+downloadAll.addEventListener("click", async () => {
+  downloadAll.disabled = true;
+  for (const choice of downloadChoices) await startDownload(choice);
+  downloadAll.disabled = false;
+});
+
 projectSelect.addEventListener("change", () => loadProjects());
 document.getElementById("ws-project-new").addEventListener("click", createProject);
 chatSelect.addEventListener("change", refreshMessages);
@@ -617,6 +763,7 @@ async function start() {
     loadAssets(),
     loadChats(),
     loadAgents(),
+    loadDownloads(),
   ]);
   await refreshMessages();
   await loadOutputs();
